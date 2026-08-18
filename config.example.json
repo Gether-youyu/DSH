@@ -1,0 +1,30 @@
+{
+  "installDir": "/你的/安装目录",
+  "feishu": {
+    "appId": "cli_xxxxxxxxxxxxxxxx",
+    "appSecret": "你的飞书应用密钥"
+  },
+  "mail": {
+    "imap": { "host": "imap.qq.com", "port": 993, "user": "你的邮箱@qq.com", "pass": "你的授权码" },
+    "smtp": { "host": "smtp.qq.com", "port": 465, "user": "你的邮箱@qq.com", "pass": "你的授权码" },
+    "allowedFrom": ["你的邮箱@qq.com"],
+    "pollSeconds": 20
+  },
+  "daily": {
+    "enabled": true,
+    "hour": 19,
+    "minute": 59,
+    "recipient": "你的邮箱@qq.com"
+  },
+  "notify": {
+    "alertChatId": "机器人告警消息发往的飞书 chat_id(可留空)"
+  },
+  "queue": {
+    "inDir": "bridge/in",
+    "alertThreshold": 20
+  },
+  "heartbeat": {
+    "file": "/tmp/dsh-heartbeat",
+    "timeoutSec": 180
+  }
+}

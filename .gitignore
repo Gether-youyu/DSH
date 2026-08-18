@@ -1,0 +1,19 @@
+# 本机凭证
+config.json
+bridge/config.json
+bridge/feishu.json
+
+# 运行时状态
+bridge/in/
+bridge/state.json
+bridge/feishu-target.json
+bridge/*.log
+
+# 依赖与发布包
+node_modules/
+dsh-mobile-*.zip
+
+# 本机文件
+.DS_Store
+DSH.app/
+DSH feishu.app/
