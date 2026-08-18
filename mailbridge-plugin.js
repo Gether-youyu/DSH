@@ -192,14 +192,50 @@ module.exports = {
       return { text: out, items: ordered.map((m) => ({ provider: m.provider, id: m.id, name: m.name })) };
     }
 
+    // 会话级模型覆盖表:sessionId -> {provider, model, reasoningEffort}
+    // 选择模型时写入,使当前对话立即生效(不只等下一个会话)
+    const sessionModelOverrides = {}; // 内存态(会话级),不持久化
+
     async function selectModel(req) {
       const effort = req.effort || DEFAULT_EFFORT;
-      await model.saveSelection({
-        provider: req.provider,
-        model: req.model,
-        ...(effort ? { reasoningEffort: effort } : {}),
-      });
-      return { text: '✅ 已切换到模型: ' + req.model + ' 强度:' + effortName(effort) + '\n新会话将使用该模型。' };
+      const sel = { provider: req.provider, model: req.model, ...(effort ? { reasoningEffort: effort } : {}) };
+      // 1) 全局默认(下一个新会话生效)
+      await model.saveSelection(sel);
+      // 2) 会话级覆盖(当前对话立即生效)
+      const sid = (req && req.targetSession) || '';
+      if (sid) {
+        sessionModelOverrides[sid] = sel;
+        // 若该会话 agent 正在运行,取消它让下一条请求用新模型
+        try {
+          const live = (agents.roots() || []).find((a) => a.id === sid);
+          if (live && live.status === 'running') live.cancel('手机端切换模型,取消当前回合(下条请求用新模型)');
+        } catch (e) {}
+      }
+      const tip = sid ? '\n当前对话已立即生效。' : '\n新会话将使用该模型。';
+      return { text: '✅ 已切换到模型: ' + req.model + ' 强度:' + effortName(effort) + tip };
+    }
+
+    // 在 agent 请求前覆盖模型:命中会话级覆盖表则替换 provider/model/effort
+    function registerModelOverride(agent) {
+      if (!agent || !agent.ctx || agent.__modelOverrideRegistered) return;
+      agent.__modelOverrideRegistered = true;
+      try {
+        agent.ctx.on('agent/request', async (_payload, next) => {
+          const resolved = await next();
+          const sid = agent.id;
+          const ov = sessionModelOverrides[sid];
+          if (!ov) return resolved;
+          const { reasoningEffort: _e, ...rest } = resolved;
+          return {
+            ...rest,
+            provider: ov.provider,
+            model: ov.model,
+            ...(ov.reasoningEffort ? { reasoningEffort: ov.reasoningEffort } : {}),
+          };
+        });
+      } catch (e) {
+        console.error('[mailbridge] 模型覆盖监听注册失败: ' + ((e && e.message) || e));
+      }
     }
 
     async function handleCommand(req) {
@@ -314,10 +350,10 @@ module.exports = {
 
     timer.interval(() => {
       try {
-        for (const a of agents.roots() || []) registerApprovalHandler(a);
+        for (const a of agents.roots() || []) { registerApprovalHandler(a); registerModelOverride(a); }
       } catch (e) {}
     }, 5000);
-    for (const a of agents.roots() || []) registerApprovalHandler(a);
+    for (const a of agents.roots() || []) { registerApprovalHandler(a); registerModelOverride(a); }
 
     async function handleControlText(req, agent) {
       const text = String(req.text || '').trim();
@@ -382,6 +418,7 @@ module.exports = {
           return;
         }
         const agent = await targetAgent(req);
+        registerModelOverride(agent); // 新/恢复的 agent 立即注册模型覆盖
         const ctl = await handleControlText(req, agent);
         if (ctl !== null) {
           await fs.writeText(target, JSON.stringify({ ...req, status: 'done', reply: ctl }));

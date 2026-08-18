@@ -126,6 +126,13 @@ function targetState() {
   return st;
 }
 
+// 当前消息去向的会话(pinned 且会话存在时),供 model-select 等命令携带
+function resolveCurrentTarget(chatId) {
+  const st = targetState();
+  if (st.mode === "pinned" && st.sessionId && sessionDirExists(st.sessionId)) return st.sessionId;
+  return null;
+}
+
 function saveState(st) { try { fs.writeFileSync(TARGET_PATH, JSON.stringify(st, null, 1)); } catch {} }
 
 function sessionDirExists(sid) { return !!findSessionFile(sid); }
@@ -262,9 +269,12 @@ async function handleCommand(rawText, chatId) {
     const item = st.items && st.items[idx];
     if (item) {
       pendingModel.delete(chatId);
+      // 携带当前目标会话,使模型切换对当前对话立即生效
+      const curTarget = resolveCurrentTarget(chatId);
       enqueueCommand(chatId, "model-select", {
         provider: item.provider,
         model: item.id,
+        ...(curTarget ? { targetSession: curTarget } : {}),
         ...(normalizeEffort(modelPick[2]) ? { effort: normalizeEffort(modelPick[2]) } : {}),
       });
       await sendText(chatId, "正在切换模型: " + item.name + (normalizeEffort(modelPick[2]) ? " 强度:" + normalizeEffort(modelPick[2]) : "") + " ...");
