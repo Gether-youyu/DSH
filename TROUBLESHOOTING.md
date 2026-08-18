@@ -19,7 +19,7 @@
 ```
 
 - 队列目录:`<安装目录>/bridge/in/`(请求文件 `{status:"new", from, text, chatId?, targetSession?}`)
-- 插件:动态 mail-4 + 持久化 `<安装目录>/mailbridge-plugin.js`(注册于 `~/.dsh/profiles/web/cordis.patch.yml`)
+- 插件:持久化 `<安装目录>/mailbridge-plugin.js`(v13,注册于 `~/.dsh/profiles/web/cordis.patch.yml`)
 - 插件逻辑:请求带 `targetSession` → 注入指定会话(离线用 `agents.resume`);不带 → 注入 PC 最近活跃会话;无活跃 → 回退 `session-mail-bridge`
 
 ## 二、飞书机器人配置(最终正确版)
@@ -64,12 +64,12 @@
 
 ## 六、邮件桥
 
-- 配置:`bridge/config.json`(imap/smtp 服务器、账号、授权码、白名单 allowedFrom)
+- 配置:根目录 `config.json` 的 `mail` 段(imap/smtp 服务器、账号、授权码、白名单 allowedFrom);兼容旧版 `bridge/config.json`
 - QQ 邮箱:IMAP 993 / SMTP 465,授权码在 QQ 邮箱设置里生成
 - 已知坑:QQ 邮箱 SMTP 的 QUIT 响应 221 会被误判为错误(状态机需处理);邮件正文会带签名/原始邮件引用,需清理
 - 邮件体验差于飞书(轮询延迟、正文污染),建议飞书为主
 
-## 七、插件 v4 说明
+## 七、插件说明
 
 - `targetSession`:请求带会话 ID 时注入指定会话(离线用 `agents.resume` 恢复)
 - 竞态修复:`whenIdle` 可能在新回合开始前返回,需轮询事件(`turn/start`/`assistant/message`)确认新回合产生后再取回复

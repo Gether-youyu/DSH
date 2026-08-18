@@ -46,8 +46,9 @@ cp config.example.json config.json
 # 3. 一键安装(自动:装SDK/注册DSH插件/挂cron/装守护/自检)
 bash install.sh
 
-# 4. 重启 DSH 使插件生效(launchd 管理的可 kill 进程自动拉起)
-#    或: launchctl kickstart -k gui/$(id -u)/com.dsh.web
+# 4. 重启 DSH 使插件生效:
+#    - 若 DSH 由 launchd 托管(服务名 com.dsh.web): launchctl kickstart -k gui/$(id -u)/com.dsh.web
+#    - 若为手动启动: kill $(lsof -tiTCP:3080 -sTCP:LISTEN) 后重新启动 DSH
 
 # 5. 手机飞书搜索你的机器人,发「使用说明」验证
 ```
@@ -74,7 +75,7 @@ bash install.sh
 
 | 事项 | 方法 |
 |---|---|
-| 飞书桥日志 | `tail -f /tmp/com.dsh.feishu-bridge.log` |
+| 飞书桥日志 | 桥自身 `/tmp/feishu-bridge.log`;launchd 重定向 `/tmp/com.dsh.feishu-bridge.log`(install.sh) |
 | 桥崩溃自愈 | launchd 守护自动重启(com.dsh.feishu-bridge) |
 | 运行监控 | cron 每分钟跑 monitor.js,异常发飞书告警 |
 | 队列清理 | 卡死文件 10 分钟自动回收重试,3 次放弃 |

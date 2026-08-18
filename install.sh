@@ -118,8 +118,9 @@ EOF
   /bin/launchctl load "$plist" 2>/dev/null && echo "  ✅ $name 守护已安装并启动" || echo "  ⚠️ $name 加载失败(可手动: launchctl load $plist)"
 }
 
+# 飞书桥(主通道)
 install_plist "com.dsh.feishu-bridge" "feishu-bridge.js"
-install_plist "com.dsh.mail-bridge" "bridge.js"
+# 邮件桥默认不安装(备用通道,如需启用: install_plist "com.dsh.mail-bridge" "bridge.js" 并重启)
 
 # ---------- 6. 队列清理 + 心跳 ----------
 echo ""

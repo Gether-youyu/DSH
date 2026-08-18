@@ -25,7 +25,7 @@
 
 ```bash
 # 1. 解压本项目
-unzip dsh-mobile.zip && cd dsh-mobile
+unzip dsh-mobile-v0.1.zip && cd dsh-mobile
 
 # 2. 复制配置模板并填写(唯一要改的文件)
 cp config.example.json config.json
@@ -73,7 +73,7 @@ kill $(lsof -tiTCP:3080 -sTCP:LISTEN)   # 系统自动拉起
 
 ```
 手机飞书 ──→ feishu-bridge.js(长连接/命令/心跳)
-手机邮件 ──→ bridge.js(IMAP/SMTP,已内置,默认未启用)
+手机邮件 ──→ bridge.js(IMAP/SMTP,已内置,默认未启用;install.sh 默认不安装,如需启用见 install.sh 注释)
 每日19:59 ─→ daily-summary.js(cron)
         ↘ 文件队列 bridge/in/ ↗
         → mailbridge-plugin.js(DSH 进程内)
@@ -93,9 +93,12 @@ dsh-mobile/
 ├── daily-summary.js     每日19:59工作总结推送
 ├── monitor.js           心跳/积压监控告警
 ├── install.sh           一键安装
+├── uninstall.sh         卸载(移除守护/cron/插件注册)
 ├── DEPLOY.md            部署文档
 ├── FEATURES.md          功能清单(含回复样式)
 ├── TROUBLESHOOTING.md   排障手册
+├── CHANGELOG.md         更新日志
+├── VERSION              版本号
 └── bridge/              队列与状态目录
 ```
 
@@ -103,14 +106,14 @@ dsh-mobile/
 
 | 事项 | 方法 |
 |---|---|
-| 桥日志 | `/tmp/com.dsh.feishu-bridge.log`(或 launchctl list) |
+| 桥日志 | 桥自身: `/tmp/feishu-bridge.log`;launchd 重定向: `/tmp/com.dsh.feishu-bridge.log`(install.sh) 或 `bridge/feishu-bridge.log`(手动部署) |
 | 桥崩溃 | launchd KeepAlive 自动重启 |
 | 监控告警 | cron 每分钟,异常发飞书 |
 | 每日推送日志 | `/tmp/daily-summary.log` |
 
 ## 版本与卸载
 
-- 当前版本: `$(cat VERSION)`(更新记录见 CHANGELOG.md)
+- 当前版本: `v0.1`(更新记录见 CHANGELOG.md)
 - 卸载:`bash uninstall.sh`(移除守护/cron/插件注册,保留项目文件)
 - 发布包:`dsh-mobile-v0.1.zip`(解压 → 配置 → install.sh)
 
@@ -118,7 +121,7 @@ dsh-mobile/
 
 - **机器人搜不到**:应用未发布/可用范围不含你
 - **私聊无事件**:没开 `im:message.p2p_msg:readonly` 或未重新发布
-- **回复收不到**:`launchctl list | grep dsh` 看桥是否运行;日志 `/tmp/com.dsh.feishu-bridge.log`
+- **回复收不到**:`launchctl list | grep dsh` 看桥是否运行;日志 `/tmp/feishu-bridge.log`(桥自身,始终有效)
 - **审批不弹**:确认 DSH 已重启(插件 v12+ 生效)
 
 ## 许可

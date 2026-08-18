@@ -7,7 +7,7 @@
  *   → DSH 邮件桥插件处理 → 写回同一文件 {status:"done", reply}
  *   → 本桥读取回复 → SMTP 发回给发件人 → 删除队列文件
  *
- * 用法: node bridge.js (配置在 bridge/config.json)
+ * 用法: node bridge.js (配置在根目录 config.json 的 mail 段;兼容旧版 bridge/config.json)
  */
 "use strict";
 

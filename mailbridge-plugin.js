@@ -1,7 +1,7 @@
-// DSH 邮件/飞书桥接插件(持久化版 v9)
+// DSH 邮件/飞书桥接插件(持久化版 v13)
 // 由 ~/.dsh/profiles/web/cordis.patch.yml 通过绝对路径加载
-// 功能:任务切换(targetSession)+ 模型选择 + 忙时提示语 + 停/继续 + 认领互斥
-// v9:修复回复泄漏(tool_calls 痕迹) + 卡死消息超时回收重试
+// 功能:任务切换(targetSession)+ 模型选择 + 忙时提示语 + 停/继续 + 审批桥 + 认领互斥 + 路径动态化
+// v13:配置路径改用插件同目录 config.json(支持目录改名后仍可分发)
 module.exports = {
   name: 'mailbridge',
   inject: ['fs', 'timer', 'agents', 'sessions', 'agentDefaultModel'],
@@ -22,7 +22,7 @@ module.exports = {
     let ALERT_CHAT = '';
     (async () => {
       try {
-        const cfgPath = '/tmp/dsh-config.json';
+        const cfgPath = __dirname + '/config.json';
         const cfgRaw = await fs.readText(await fs.resolve(cfgPath));
         const cfgJson = JSON.parse(cfgRaw);
         if (cfgJson.installDir) {
@@ -55,11 +55,24 @@ module.exports = {
     // 剥离 assistant 消息里的工具调用轨迹(<tool_calls>/<invoke name= XML),防止泄漏给飞书/邮件
     function stripToolTrace(s) {
       if (!s) return '';
-      let t = s.replace(/<\s*\/?\s*tool_calls[\s\S]*?<\s*\/\s*tool_calls\s*>/gi, ' ')
-               .replace(/<\s*tool_calls[\s\S]*$/gi, ' ');
+      let t = s;
+      // 1) 标准 XML 形式: <tool_calls>...</tool_calls> / <invoke name=...> / <tool_result>...</tool_result>
+      t = t.replace(/<\s*\/?\s*tool_calls[\s\S]*?<\s*\/\s*tool_calls\s*>/gi, ' ')
+           .replace(/<\s*tool_calls[\s\S]*$/gi, ' ');
       t = t.replace(/<\s*invoke\s+name=[\s\S]*?>/gi, ' ').replace(/<\s*\/\s*invoke\s*>/gi, ' ');
       t = t.replace(/<\s*tool_result[\s\S]*?<\s*\/\s*tool_result\s*>/gi, ' ')
            .replace(/<\s*tool_result[\s\S]*$/gi, ' ');
+      // 2) DSML 流标记变体(飞书显示为全角): ｜｜DSML ｜｜tool_calls ｜｜invoke 等
+      t = t.replace(/[｜|]{1,2}\s*DSML[\s\S]*?[｜|]{1,2}\s*DSML/gi, ' ')
+           .replace(/[｜|]{1,2}\s*DSML[\s\S]*$/gi, ' ');
+      t = t.replace(/[｜|]{1,2}\s*tool_calls[\s\S]*?[｜|]{1,2}\s*tool_calls\s*>/gi, ' ')
+           .replace(/[｜|]{1,2}\s*tool_calls[\s\S]*$/gi, ' ');
+      t = t.replace(/[｜|]{1,2}\s*invoke[\s\S]*?>/gi, ' ').replace(/[｜|]{1,2}\s*\/\s*invoke\s*>/gi, ' ');
+      // 兜底:清理残留 XML/DSML 标签碎片
+      t = t.replace(/<\/?[a-zA-Z_][^>]*>/g, ' ').replace(/[<>]/g, ' ');
+      t = t.replace(/[｜|]{1,2}\s*\/?\s*[a-z_]+[^\n]*?[｜|]?/gi, ' ');
+      t = t.replace(/[ \t]{2,}/g, ' ').replace(/(\n\s*){2,}/g, '\n');
+      t = t.replace(/[\/｜|]{1,3}\s*$/g, '');
       return t.trim();
     }
 

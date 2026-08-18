@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * DSH 每日邮件提醒 —— 每天 19:59 由 cron 触发。
- * 扫描记忆文件的"系统索引 + 任务摘要"两层(不扫完整上下文),
+ * 直接统计会话文件当天活动(只解析时间/轮次元数据,不读对话正文),
  * 总结当天 0 点至执行前的用户活动,用 DeepSeek 生成生动总结,SMTP 发送。
  */
 "use strict";
@@ -20,6 +20,14 @@ let cfg = null;
 try { cfg = JSON.parse(fs.readFileSync(__dirname + "/config.json", "utf8")); if (cfg.mail) cfg = cfg.mail; } catch (e) {}
 if (!cfg) { try { cfg = JSON.parse(fs.readFileSync(BRIDGE_DIR + "/config.json", "utf8")); } catch (e2) {} }
 const EMAIL = (cfg && cfg.smtp && cfg.smtp.user) || "";
+// 每日推送收件人:优先 daily.recipient,否则回退到发件邮箱
+let RECIPIENT = EMAIL;
+{
+  try {
+    const full = JSON.parse(fs.readFileSync(__dirname + "/config.json", "utf8"));
+    if (full.daily && full.daily.recipient) RECIPIENT = full.daily.recipient;
+  } catch (e) {}
+}
 const PASS = (cfg && cfg.smtp && cfg.smtp.pass) || "";
 const SMTP_HOST = (cfg && cfg.smtp && cfg.smtp.host) || "smtp.qq.com";
 const SMTP_PORT = (cfg && cfg.smtp && cfg.smtp.port) || 465;
@@ -34,31 +42,61 @@ function getApiKey() {
 }
 const API_KEY = getApiKey();
 
-// ---------- 读取记忆文件(系统索引 + 任务摘要,不扫完整上下文) ----------
+// ---------- 读取会话文件,统计当天真实活动(只解析元数据行,不碰对话正文) ----------
+const { execFileSync } = require("child_process");
+function readZstdSession(fp) {
+  // 用 zstd CLI 解压整文件为行(本地命令,不依赖 SDK)
+  try {
+    const out = execFileSync("zstd", ["-dc", fp], { maxBuffer: 512 * 1024 * 1024, encoding: "utf8" });
+    return out;
+  } catch (e) { return ""; }
+}
+function analyzeToday(fp, startOfDay, nowMs) {
+  const raw = readZstdSession(fp);
+  if (!raw) return null;
+  const times = [];
+  let turns = 0, steps = 0;
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    try {
+      const o = JSON.parse(line);
+      if (!o.time || o.time < startOfDay || o.time > nowMs) continue;
+      times.push(o.time);
+      if (o.type === "turn/start") turns++;
+      if (o.type === "step/start") steps++;
+    } catch (e) {}
+  }
+  if (!times.length) return null;
+  times.sort((a, b) => a - b);
+  return { firstAt: times[0], lastAt: times[times.length - 1], times, turns, steps };
+}
 function readMemory() {
   const proj = JSON.parse(fs.readFileSync(HOME + "/.dsh/storages/session_projcache.json", "utf8"));
   const sessions = (proj.tables && proj.tables.sessions) || {};
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const today = [];
+  const sessionsRoot = HOME + "/.dsh/sessions";
   for (const [sid, s] of Object.entries(sessions)) {
     const rows = (s && s.rows) || {};
     const meta = (rows.sessionListMetadata && rows.sessionListMetadata.val) || {};
     const title = ((rows.title && rows.title.val) || "").trim();
-    const stats = (rows.sessionStats && rows.sessionStats.val) || {};
     const lastAt = meta.lastPromptAt || 0;
-    if (lastAt >= startOfDay && lastAt <= now.getTime()) {
-      today.push({
-        sid, title,
-        lastAt,
-        turns: stats.turns || 0,
-        steps: stats.steps || 0,
-        llmMs: stats.llmMs || 0,
-        toolMs: stats.toolMs || 0,
-      });
-    }
+    if (lastAt < startOfDay || lastAt > now.getTime()) continue;
+    // 定位会话文件(目录按 cwd 编码,需扫描)
+    let fp = "";
+    try {
+      for (const d of fs.readdirSync(sessionsRoot)) {
+        const cand = sessionsRoot + "/" + d + "/" + sid + "/session.jsonl.zstd";
+        if (fs.existsSync(cand)) { fp = cand; break; }
+      }
+    } catch (e) {}
+    if (!fp) continue;
+    const stat = analyzeToday(fp, startOfDay, now.getTime());
+    if (!stat) continue;
+    today.push({ sid, title, ...stat });
   }
-  today.sort((a, b) => a.lastAt - b.lastAt);
+  today.sort((a, b) => a.firstAt - b.firstAt);
   return { today, now, startOfDay };
 }
 
@@ -150,15 +188,31 @@ async function main() {
   const dateStr = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
 
   // 计算活跃时长(LLM+工具计算时间)
-  const workSec = today.reduce((a, b) => a + (b.llmMs + b.toolMs), 0) / 1000;
-  const workHours = workSec / 3600;
+  // 活跃窗口 = 今天最早事件到最晚事件(或当前时间)的跨度
+  // 活跃时长:合并所有事件时间点,相邻间隔>30分钟视为休息
+  let workHours = 0;
+  {
+    const all = [];
+    for (const t of today) for (const ts of (t.times || [])) all.push(ts);
+    all.sort((a, b) => a - b);
+    if (all.length > 1) {
+      let activeMs = 0;
+      for (let i = 1; i < all.length; i++) {
+        const gap = all[i] - all[i - 1];
+        if (gap > 0 && gap <= 30 * 60 * 1000) activeMs += gap;
+      }
+      workHours = activeMs / 3600000;
+    }
+  }
   const stillWorking = today.length > 0 && (now.getTime() - Math.max(...today.map((t) => t.lastAt))) < 30 * 60 * 1000;
 
   // 活动清单
   const items = today.map((t) => {
-    const hh = new Date(t.lastAt);
+    const hh = new Date(t.firstAt);
     const ts = String(hh.getHours()).padStart(2, "0") + ":" + String(hh.getMinutes()).padStart(2, "0");
-    return "- [" + ts + "] " + (t.title || "未命名任务") + "(" + t.turns + "轮)";
+    const end = new Date(t.lastAt);
+    const ts2 = String(end.getHours()).padStart(2, "0") + ":" + String(end.getMinutes()).padStart(2, "0");
+    return "- [" + ts + "-" + ts2 + "] " + (t.title || "未命名任务") + "(" + t.turns + "轮)";
   }).join("\n") || "(今天暂无记录)";
 
   // 生成总结
@@ -184,7 +238,7 @@ async function main() {
     (stillWorking ? "(仍在工作中)" : "");
 
   const subject = "DSH提醒 " + dateStr;
-  await smtpSend(EMAIL, subject, body);
+  await smtpSend(RECIPIENT, subject, body);
   console.log("邮件已发送: " + subject);
 }
 
