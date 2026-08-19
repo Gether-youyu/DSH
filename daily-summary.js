@@ -46,10 +46,24 @@ const API_KEY = getApiKey();
 
 // ---------- 读取会话文件,统计当天真实活动(只解析元数据行,不碰对话正文) ----------
 const { execFileSync } = require("child_process");
+// zstd 候选路径:cron 环境的 PATH 不含 /opt/homebrew/bin 等,必须用绝对路径定位
+const ZSTD_CANDIDATES = [
+  "/opt/homebrew/bin/zstd",
+  "/usr/local/bin/zstd",
+  "/usr/bin/zstd",
+  "zstd", // 兜底:交给 PATH
+];
+function resolveZstd() {
+  for (const c of ZSTD_CANDIDATES) {
+    try { execFileSync(c, ["--version"], { stdio: "ignore" }); return c; } catch (e) {}
+  }
+  return "zstd";
+}
+let _zstd = resolveZstd();
 function readZstdSession(fp) {
-  // 用 zstd CLI 解压整文件为行(本地命令,不依赖 SDK)
+  // 用 zstd CLI 解压整文件为行(本地命令,不依赖 SDK;cron 环境需绝对路径)
   try {
-    const out = execFileSync("zstd", ["-dc", fp], { maxBuffer: 512 * 1024 * 1024, encoding: "utf8" });
+    const out = execFileSync(_zstd, ["-dc", fp], { maxBuffer: 512 * 1024 * 1024, encoding: "utf8" });
     return out;
   } catch (e) { return ""; }
 }

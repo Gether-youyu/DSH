@@ -192,56 +192,49 @@ module.exports = {
       let out = '🤖 模型列表:\n当前: ' + sel.model + ' 强度:' + effortName(sel.reasoningEffort) + '\n\n';
       ordered.forEach((m, i) => { out += (i + 1) + '. ' + m.name + '\n'; });
       out += '\n请输入序号选择模型';
-      out += '\n推理强度可选: off / high / max';
-      out += '\n不选强度则使用系统默认强度:' + effortName(DEFAULT_EFFORT);
+      out += '\n推理强度可选: off / high / max(仅支持的模型)';
+      out += '\n不选强度则使用模型默认强度';
       return { text: out, items: ordered.map((m) => ({ provider: m.provider, id: m.id, name: m.name })) };
     }
 
-    // 会话级模型覆盖表:sessionId -> {provider, model, reasoningEffort}
-    // 选择模型时写入,使当前对话立即生效(不只等下一个会话)
-    const sessionModelOverrides = {}; // 内存态(会话级),不持久化
-
     async function selectModel(req) {
-      const effort = req.effort || DEFAULT_EFFORT;
+      // 用户不带强度时:不传 reasoningEffort,让 DSH 用模型自身默认(避免默认 max 被不支持)
+      const effort = req.effort;
       const sel = { provider: req.provider, model: req.model, ...(effort ? { reasoningEffort: effort } : {}) };
-      // 1) 全局默认(下一个新会话生效)
-      await model.saveSelection(sel);
-      // 2) 会话级覆盖(当前对话立即生效)
-      const sid = (req && req.targetSession) || '';
-      if (sid) {
-        sessionModelOverrides[sid] = sel;
-        // 若该会话 agent 正在运行,取消它让下一条请求用新模型
-        try {
-          const live = (agents.roots() || []).find((a) => a.id === sid);
-          if (live && live.status === 'running') live.cancel('手机端切换模型,取消当前回合(下条请求用新模型)');
-        } catch (e) {}
+      // 先校验该模型是否支持此推理强度(与官方 selectModel 同源校验)
+      try {
+        const llmSvc = ctx.get('llm');
+        if (llmSvc) {
+          await llmSvc.resolveCallConfig(sel);
+        }
+      } catch (e) {
+        return { text: '❌ 该模型不支持 ' + effortName(effort) + ' 推理强度:' + ((e && e.message) || e) + '\n可重发数字选择模型,不带强度则用模型默认' };
       }
-      const tip = sid ? '\n当前对话已立即生效。' : '\n新会话将使用该模型。';
-      return { text: '✅ 已切换到模型: ' + req.model + ' 强度:' + effortName(effort) + tip };
+      // 1) 全局默认(新会话使用该模型)
+      try { await model.saveSelection(sel); } catch (e) {}
+      // 2) 走官方 session.selectModel 通道:当前会话立即生效(含已记录模型选择的会话)
+      const sid = (req && req.targetSession) || '';
+      let curEffect = false;
+      if (sid) {
+        try {
+          const apiProxy = ctx.get('apiProxy');
+          if (apiProxy && apiProxy.sessions && typeof apiProxy.sessions.selectModel === 'function') {
+            // api.sessions.selectModel 是 RPC 业务方法,期望 { payload: {...} },返回 { rpcId, result:{ok,value} }
+            const res = await apiProxy.sessions.selectModel({ payload: { sessionId: sid, ...sel } });
+            const okFlag = !!(res && res.result && res.result.ok === true);
+            const errInfo = (res && res.result && res.result.ok === false && res.result.error) ? (res.result.error.message || JSON.stringify(res.result.error)) : (res && res.error ? (res.error.message || JSON.stringify(res.error)) : '');
+            if (!okFlag) throw new Error(errInfo || 'selectModel RPC 返回失败');
+            curEffect = true;
+          }
+        } catch (e) {
+          console.error('[mailbridge] 官方 selectModel 通道失败(回退仅全局默认): ' + ((e && e.message) || e));
+        }
+      }
+      const tip = curEffect ? '\n当前对话已立即生效。' : '\n新会话将使用该模型。';
+      const effTxt = effort ? ' 强度:' + effortName(effort) : '(模型默认强度)';
+      return { text: '✅ 已切换到模型: ' + req.model + effTxt + tip };
     }
 
-    // 在 agent 请求前覆盖模型:命中会话级覆盖表则替换 provider/model/effort
-    function registerModelOverride(agent) {
-      if (!agent || !agent.ctx || agent.__modelOverrideRegistered) return;
-      agent.__modelOverrideRegistered = true;
-      try {
-        agent.ctx.on('agent/request', async (_payload, next) => {
-          const resolved = await next();
-          const sid = agent.id;
-          const ov = sessionModelOverrides[sid];
-          if (!ov) return resolved;
-          const { reasoningEffort: _e, ...rest } = resolved;
-          return {
-            ...rest,
-            provider: ov.provider,
-            model: ov.model,
-            ...(ov.reasoningEffort ? { reasoningEffort: ov.reasoningEffort } : {}),
-          };
-        });
-      } catch (e) {
-        console.error('[mailbridge] 模型覆盖监听注册失败: ' + ((e && e.message) || e));
-      }
-    }
 
     async function handleCommand(req) {
       try {
@@ -355,10 +348,10 @@ module.exports = {
 
     timer.interval(() => {
       try {
-        for (const a of agents.roots() || []) { registerApprovalHandler(a); registerModelOverride(a); }
+        for (const a of agents.roots() || []) registerApprovalHandler(a);
       } catch (e) {}
     }, 5000);
-    for (const a of agents.roots() || []) { registerApprovalHandler(a); registerModelOverride(a); }
+    for (const a of agents.roots() || []) registerApprovalHandler(a);
 
     async function handleControlText(req, agent) {
       const text = String(req.text || '').trim();
@@ -423,7 +416,6 @@ module.exports = {
           return;
         }
         const agent = await targetAgent(req);
-        registerModelOverride(agent); // 新/恢复的 agent 立即注册模型覆盖
         const ctl = await handleControlText(req, agent);
         if (ctl !== null) {
           await fs.writeText(target, JSON.stringify({ ...req, status: 'done', reply: ctl }));
@@ -467,13 +459,21 @@ module.exports = {
           }
         }, 30000);
 
+        // 等待回合真正结束:看到 assistant/message 产出后,等待 turn/end 事件(而非 whenIdle 短暂空闲),
+        // 避免 agent 工具调用间隙的假 idle 导致提前结束、取消 30 秒提示
         while (Date.now() < deadline) {
           await sleep(600);
           const evs = (agent.session.events || []).filter((e) => e.seq >= firstSeq);
           if (evs.some((e) => e.type === 'turn/start' || e.type === 'assistant/message')) saw = true;
+          // 回合真正结束的标志:出现了 turn/end,或产出 assistant/message 后连续 2 次确认 idle(间隔检查,防假 idle)
+          if (evs.some((e) => e.type === 'turn/end')) break;
           if (saw) {
-            const idle = await Promise.race([agent.whenIdle().then(() => true), sleep(2000).then(() => false)]);
-            if (idle) break;
+            const idle1 = await Promise.race([agent.whenIdle().then(() => true), sleep(2000).then(() => false)]);
+            if (idle1) {
+              await sleep(600);
+              const idle2 = await Promise.race([agent.whenIdle().then(() => true), sleep(2000).then(() => false)]);
+              if (idle2) break; // 连续两次确认空闲,判定回合结束
+            }
           }
         }
         disposePrompt();

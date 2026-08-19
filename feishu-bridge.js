@@ -243,7 +243,9 @@ async function handleCommand(rawText, chatId) {
     return true;
   }
   // 切换 N:支持 "3" 直接切换,也兼容 "切换 3" / "switch 3"
-  const m = text.match(/^切换\s*(\d+)$/) || text.match(/^switch\s*(\d+)$/i) || text.match(/^(\d{1,2})$/);
+  // 注意:裸数字若正处于"选择模型"状态,须留给模型选择分支处理,不抢任务切换
+  const m = text.match(/^切换\s*(\d+)$/) || text.match(/^switch\s*(\d+)$/i) ||
+    (pendingModel.has(chatId) ? null : text.match(/^(\d{1,2})$/));
   if (m) {
     const n = Number(m[1]);
     const last = (st.lastList || (readJson(TARGET_PATH, {}).lastList)) || [];
@@ -265,10 +267,14 @@ async function handleCommand(rawText, chatId) {
   const modelPick = text.match(/^(\d{1,2})(?:\s+(\S+))?$/);
   if (modelPick && pendingModel.has(chatId)) {
     const st = pendingModel.get(chatId);
+    if (st.expireAt && Date.now() > st.expireAt) { pendingModel.delete(chatId); }  // 超时清状态
+    else {
     const idx = parseInt(modelPick[1], 10) - 1;
     const item = st.items && st.items[idx];
     if (item) {
-      pendingModel.delete(chatId);
+      // 不立即删 pendingModel:等 DSH 回复成功才删,失败则保留让用户重选
+      if (st.selecting) { await sendText(chatId, "正在切换模型,请稍候..."); return true; }
+      pendingModel.set(chatId, { ...st, selecting: true });
       // 携带当前目标会话,使模型切换对当前对话立即生效
       const curTarget = resolveCurrentTarget(chatId);
       enqueueCommand(chatId, "model-select", {
@@ -279,6 +285,10 @@ async function handleCommand(rawText, chatId) {
       });
       await sendText(chatId, "正在切换模型: " + item.name + (normalizeEffort(modelPick[2]) ? " 强度:" + normalizeEffort(modelPick[2]) : "") + " ...");
       return true;
+    } else {
+      await sendText(chatId, "序号超出范围(1-" + st.items.length + ")，请重新发送「选择模型」获取最新列表。");
+      return true;
+    }
     }
   }
   // 跟随电脑
@@ -298,7 +308,7 @@ async function handleCommand(rawText, chatId) {
 }
 
 // ---------- 队列 ----------
-const pendingModel = new Map(); // chatId -> { items: [{provider,id,name}] } 模型选择状态
+const pendingModel = new Map(); // chatId -> { items: [{provider,id,name}], expireAt } 模型选择状态(带超时)
 
 function enqueue(text, chatId, targetSession) {
   const fileName = "feishu-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6) + ".json";
@@ -338,6 +348,7 @@ function stripTraceForSend(s) {
 
 async function sendText(chatId, text) {
   text = stripTraceForSend(text);
+  console.log("[feishu] 发送文本(" + String(text).length + "字)");
   if (!text || !String(text).trim()) { console.log("[feishu] 跳过空回复"); return true; }
   try {
     await client.im.message.create({
@@ -376,8 +387,20 @@ async function drainQueue() {
       }
       // 模型列表回复带 items 时缓存选择状态
       if (state.items && state.chatId && state.command === "model-list") {
-        pendingModel.set(state.chatId, { items: state.items });
+        pendingModel.set(state.chatId, { items: state.items, expireAt: Date.now() + 120000 });
         console.log("[feishu] 已缓存模型列表: " + state.chatId + " (" + state.items.length + " 项)");
+      }
+      // model-select 回复:成功才删 pendingModel,失败保留让用户重选
+      if (state.chatId && state.command === "model-select") {
+        const pm = pendingModel.get(state.chatId);
+        const replyText = String(state.reply || "");
+        if (replyText.startsWith("✅")) {
+          pendingModel.delete(state.chatId);
+          console.log("[feishu] 模型切换成功,已清 pendingModel");
+        } else {
+          if (pm) pendingModel.set(state.chatId, { ...pm, selecting: false });
+          console.log("[feishu] 模型切换失败(保留 pendingModel 供重选): " + replyText.slice(0, 40));
+        }
       }
       const ok = await sendText(state.chatId, state.reply || "(无回复)");
       if (ok) { try { fs.unlinkSync(fp); } catch {} }
