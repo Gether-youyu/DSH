@@ -33,11 +33,13 @@ const SMTP_HOST = (cfg && cfg.smtp && cfg.smtp.host) || "smtp.qq.com";
 const SMTP_PORT = (cfg && cfg.smtp && cfg.smtp.port) || 465;
 
 function getApiKey() {
+  // DSH 设置页凭据(~/.dsh/.credentials.yaml,Models 页写入)
   try {
-    const s = fs.readFileSync(HOME + "/.dsh/run-dsh-web.sh", "utf8");
-    const m = s.match(/DEEPSEEK_API_KEY="([^"]+)"/);
-    if (m) return m[1];
+    const c = fs.readFileSync(HOME + "/.dsh/.credentials.yaml", "utf8");
+    const m = c.match(/DEEPSEEK_API_KEY:\s*["\x27]?([^"\x27\s]+)/);
+    if (m) return m[1].replace(/["\x27]/g, "");
   } catch (e) {}
+  // 环境变量兜底(手动启动 dsh 时可用)
   return process.env.DEEPSEEK_API_KEY || "";
 }
 const API_KEY = getApiKey();

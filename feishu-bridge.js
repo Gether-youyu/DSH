@@ -321,7 +321,23 @@ function normalizeEffort(e) {
   return undefined;
 }
 
+// 发送前兜底:剥离工具调用痕迹(与插件同规则,防泄漏到飞书)
+function stripTraceForSend(s) {
+  if (!s) return s;
+  let t = String(s).replace(/[＜＞]/g, (c) => (c === '＜' ? '<' : '>')).replace(/[｜]/g, '|');
+  t = t.replace(/<\s*\/?\s*tool_calls[\s\S]*?<\s*\/\s*tool_calls\s*>/gi, ' ').replace(/<\s*tool_calls[\s\S]*$/gi, ' ');
+  t = t.replace(/<\s*invoke\s+name=[\s\S]*?>/gi, ' ').replace(/<\s*\/\s*invoke\s*>/gi, ' ');
+  t = t.replace(/\|{1,2}\s*DSML[\s\S]*$/gi, ' ');
+  t = t.replace(/\|{1,2}\s*tool_calls[\s\S]*$/gi, ' ');
+  t = t.replace(/\|{1,2}\s*invoke[\s\S]*?>/gi, ' ');
+  t = t.replace(/<\/?[a-zA-Z_][^>]*>/g, ' ').replace(/[<>]/g, ' ');
+  t = t.replace(/[ \t]{2,}/g, ' ').replace(/(\n\s*){2,}/g, '\n');
+  t = t.replace(/[\/|]{1,3}\s*$/g, '');
+  return t.trim();
+}
+
 async function sendText(chatId, text) {
+  text = stripTraceForSend(text);
   if (!text || !String(text).trim()) { console.log("[feishu] 跳过空回复"); return true; }
   try {
     await client.im.message.create({

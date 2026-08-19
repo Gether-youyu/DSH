@@ -53,26 +53,31 @@ module.exports = {
     let busy = false;
 
     // 剥离 assistant 消息里的工具调用轨迹(<tool_calls>/<invoke name= XML),防止泄漏给飞书/邮件
+    // 全角/半角归一化:把飞书可能转义的 ＜＞｜｜ 统一还原为 <>|,再走标准正则
+    function normalizeAngle(s) {
+      return s.replace(/[＜＞]/g, (c) => (c === '＜' ? '<' : '>'))
+              .replace(/[｜]/g, '|');
+    }
     function stripToolTrace(s) {
       if (!s) return '';
-      let t = s;
-      // 1) 标准 XML 形式: <tool_calls>...</tool_calls> / <invoke name=...> / <tool_result>...</tool_result>
+      let t = normalizeAngle(s);
+      // 1) 标准 XML 形式(归一化后统一处理): <tool_calls>...</tool_calls> / <invoke name=...> / <tool_result>...</tool_result>
       t = t.replace(/<\s*\/?\s*tool_calls[\s\S]*?<\s*\/\s*tool_calls\s*>/gi, ' ')
            .replace(/<\s*tool_calls[\s\S]*$/gi, ' ');
       t = t.replace(/<\s*invoke\s+name=[\s\S]*?>/gi, ' ').replace(/<\s*\/\s*invoke\s*>/gi, ' ');
       t = t.replace(/<\s*tool_result[\s\S]*?<\s*\/\s*tool_result\s*>/gi, ' ')
            .replace(/<\s*tool_result[\s\S]*$/gi, ' ');
-      // 2) DSML 流标记变体(飞书显示为全角): ｜｜DSML ｜｜tool_calls ｜｜invoke 等
-      t = t.replace(/[｜|]{1,2}\s*DSML[\s\S]*?[｜|]{1,2}\s*DSML/gi, ' ')
-           .replace(/[｜|]{1,2}\s*DSML[\s\S]*$/gi, ' ');
-      t = t.replace(/[｜|]{1,2}\s*tool_calls[\s\S]*?[｜|]{1,2}\s*tool_calls\s*>/gi, ' ')
-           .replace(/[｜|]{1,2}\s*tool_calls[\s\S]*$/gi, ' ');
-      t = t.replace(/[｜|]{1,2}\s*invoke[\s\S]*?>/gi, ' ').replace(/[｜|]{1,2}\s*\/\s*invoke\s*>/gi, ' ');
-      // 兜底:清理残留 XML/DSML 标签碎片
+      // 2) DSML 流标记变体(归一化后 |DSML |tool_calls |invoke 等)
+      t = t.replace(/\|{1,2}\s*DSML[\s\S]*?\|{1,2}\s*DSML/gi, ' ')
+           .replace(/\|{1,2}\s*DSML[\s\S]*$/gi, ' ');
+      t = t.replace(/\|{1,2}\s*tool_calls[\s\S]*?\|{1,2}\s*tool_calls\s*>/gi, ' ')
+           .replace(/\|{1,2}\s*tool_calls[\s\S]*$/gi, ' ');
+      t = t.replace(/\|{1,2}\s*invoke[\s\S]*?>/gi, ' ').replace(/\|{1,2}\s*\/\s*invoke\s*>/gi, ' ');
+      // 3) 兜底:清理残留标签碎片(含 | 变体)
       t = t.replace(/<\/?[a-zA-Z_][^>]*>/g, ' ').replace(/[<>]/g, ' ');
-      t = t.replace(/[｜|]{1,2}\s*\/?\s*[a-z_]+[^\n]*?[｜|]?/gi, ' ');
+      t = t.replace(/\|{1,2}\s*\/?\s*[a-z_]+[^\n]*?\|?/gi, ' ');
       t = t.replace(/[ \t]{2,}/g, ' ').replace(/(\n\s*){2,}/g, '\n');
-      t = t.replace(/[\/｜|]{1,3}\s*$/g, '');
+      t = t.replace(/[\/|]{1,3}\s*$/g, '');
       return t.trim();
     }
 
