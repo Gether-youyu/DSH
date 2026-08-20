@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * DSH 飞书桥 v4 -- 官方 SDK 长连接 + 任务管理命令 + 内置定时调度。
+ * DSH 飞书桥 v5 -- 官方 SDK 长连接 + 任务管理命令 + 内置定时调度。
+ * v5:回复发送成功但队列文件删除失败时,同进程内不再重发(防受限运行环境下的消息轰炸)。
  * 手机飞书私聊机器人 -> 命令(本地处理) / 消息(队列 -> DSH 插件注入指定会话) -> 回复。
  *
  * 命令(发原文即可,大小写不限):
@@ -416,6 +417,8 @@ async function sendText(chatId, text) {
 }
 
 const sendFail = new Map(); // 文件名 -> 连续发送失败次数(防无限重试)
+// 已成功发送过的文件:发送成功但删除失败时(如受限运行环境),同进程内跳过,防重复轰炸
+const sentOk = new Set();
 
 async function drainQueue() {
   let files;
@@ -462,9 +465,11 @@ async function drainQueue() {
         try { fs.renameSync(fp, fp + ".dead"); } catch { try { fs.unlinkSync(fp); } catch {} }
         continue;
       }
+      if (sentOk.has(f)) continue;
       const ok = await sendText(state.chatId, state.reply || "(无回复)");
       if (ok) {
-        try { fs.unlinkSync(fp); } catch {}
+        sentOk.add(f);
+        try { fs.unlinkSync(fp); } catch { console.error("[feishu] 回复已发送但队列文件删除失败,本进程内跳过重发: " + f); }
         sendFail.delete(f);
       } else {
         const n = (sendFail.get(f) || 0) + 1;
@@ -476,8 +481,11 @@ async function drainQueue() {
         }
       }
     } else if (state.status === "error") {
-      await sendText(state.chatId, "处理出错: " + (state.error || "未知错误"));
-      try { fs.unlinkSync(fp); } catch {}
+      if (sentOk.has(f)) continue;
+      if (await sendText(state.chatId, "处理出错: " + (state.error || "未知错误"))) {
+        sentOk.add(f);
+        try { fs.unlinkSync(fp); } catch {}
+      }
     }
   }
 }
@@ -562,7 +570,7 @@ if (process.argv[2] === "test-card") {
 }
 
 channel.connect().then(() => {
-  console.log("[feishu] 飞书桥 v4 已启动,长连接已建立 " + new Date().toLocaleString() + ",App: " + APP_ID);
+  console.log("[feishu] 飞书桥 v5 已启动,长连接已建立 " + new Date().toLocaleString() + ",App: " + APP_ID);
 }).catch((e) => {
   console.error("[feishu] 连接失败: " + ((e && e.message) || e));
   process.exit(1);
