@@ -1,6 +1,6 @@
 # <DSH永不眠>功能清单(飞书 + 邮件)
 
-版本:桥 v3 / 插件 v13 | 更新:2026-08-18
+版本:桥 v5 / 插件 v14 | 更新:2026-08-20
 
 ---
 
@@ -8,7 +8,7 @@
 
 | 通道 | 使用方式 | 说明 |
 |---|---|---|
-| **飞书(主)** | 手机飞书 → 搜索「炒鸡赛亚人的DSH」机器人 → 私聊 | 实时,支持全部指令 |
+| **飞书(主)** | 手机飞书 -> 搜索你创建的 DSH 机器人 -> 私聊 | 实时,支持全部指令 |
 | **邮件** | 发邮件到配置的邮箱,正文即内容 | 已内置,当前默认未启用;飞书为主通道 |
 | **每日推送** | 每天 19:59 自动发邮件 | 当天工作总结,无需操作 |
 
@@ -86,7 +86,7 @@
 **回复**(空闲时):`当前没有正在执行的任务。`
 
 **指令**:`继续`
-**回复**:`🔄 已恢复执行被终止的任务：<任务内容前60字>…`
+**回复**:`🔄 已恢复执行被终止的任务：<任务内容前60字>…`(任务完成后,同一条消息追加执行结果)
 **回复**(无记录):`没有已终止的任务可恢复。`
 
 > 忙时发的普通消息会排队,当前任务结束后自动补处理并回复。
@@ -122,20 +122,21 @@
 ## 四、技术架构(供维护)
 
 ```
-手机飞书 → 飞书机器人(长连接,SDK) → feishu-bridge.js(命令/状态机)
-手机邮件 → QQ邮箱 IMAP/SMTP → bridge.js
+手机飞书 -> 飞书机器人(长连接,SDK) -> feishu-bridge.js(命令/状态机/内置定时调度)
+手机邮件 -> QQ邮箱 IMAP/SMTP -> bridge.js
         ↘ 队列 bridge/in/*.json ↗
-        → mailbridge 插件(DSH 进程内,v13)
+        -> mailbridge 插件(DSH 进程内,v14)
           · 注入 PC 当前活跃会话 / 指定任务(targetSession)
           · 命令处理:task-list/task-select/model-list/model-select
           · 忙时 30 秒提示、停/继续、消息排队补处理
-        → 回复写回队列 → 桥发送 → 飞书/邮件
+        -> 回复写回队列 -> 桥发送(防重发保护) -> 飞书/邮件
 ```
 
 关键文件:
-- `feishu-bridge.js` — 飞书桥(命令识别、单实例端口锁、日志 /tmp/feishu-bridge.log)
-- `bridge.js` — 邮件桥
-- `mailbridge-plugin.js` — DSH 插件(持久化,~/.dsh/profiles/web/cordis.patch.yml 注册)
-- `daily-summary.js` — 每日推送(cron:59 19 * * *)
-- `bridge/state.json` — 会话映射/排队状态
-- `TROUBLESHOOTING.md` — 排障手册
+- `feishu-bridge.js` - 飞书桥(命令识别、单实例端口锁、内置定时调度、防重发,日志 /tmp/feishu-bridge.log)
+- `bridge.js` - 邮件桥
+- `mailbridge-plugin.js` - DSH 插件(持久化,~/.dsh/profiles/web/cordis.patch.yml 注册)
+- `daily-summary.js` - 每日推送(桥内置调度,每日 19:59;模型与密钥走 DSH 设置)
+- `monitor.js` - 心跳/积压监控(桥内置调度,每分钟)
+- `bridge/state.json` - 会话映射/排队状态
+- `TROUBLESHOOTING.md` - 排障手册

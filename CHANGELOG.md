@@ -1,6 +1,24 @@
 # 更新日志
 
-## v0.1 (2026-08-18) — 首个可发布版本
+## v0.2 (2026-08-20) - 定时任务内置化 + 可靠性加固
+
+### 架构收敛
+- **定时任务内置飞书桥(v4)**:监控(每分钟)与每日总结(19:59)由桥进程内调度拉起,删除全部 cron / 独立 launchd 定时项
+- 系统登录项只剩 DSH 与 DSH feishu 两个(旧形态直跑 node 会显示为「Node.js Foundation」)
+- install.sh 统一服务形态:自动清理旧服务残留(com.dsh.feishu-bridge / monitor / daily-summary),桥守护改用 .app 包装(wrapper 路径动态解析,项目移动目录仍可用)
+- 删除 migrate-launchd.sh(迁移逻辑并入 install.sh)
+
+### 修复
+- **「停/继续」恢复任务后无回复**(插件 v14):「继续」改走与普通任务相同的完整投递流程,恢复执行的结果会送达飞书;任务被终止/报错时如实告知
+- **重复消息轰炸防护**(桥 v5):回复发送成功但队列文件删除失败时(受限运行环境),同进程内不再重发;记录 24h 自动清理不膨胀
+- 每日总结的模型与密钥统一走 DSH 设置(settings.yaml / .credentials.yaml),不再另设配置路径
+
+### 运维经验(详见 TROUBLESHOOTING.md)
+- macOS BTM 幽灵条目(plist 已删但登录项仍显示)需 `sudo sfltool resetbtm` + 重启根除
+- launchctl 对已注册服务执行 bootstrap/load 报 EIO(5) 属误报,非故障
+- 受限环境手动拉起桥会导致队列文件无法删除,引发重发循环;必须由 launchd 正常启动
+
+## v0.1 (2026-08-18) - 首个可发布版本
 
 ### 功能
 - 飞书对话:消息注入 PC 当前任务会话,回复回飞书

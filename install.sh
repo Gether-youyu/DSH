@@ -88,32 +88,51 @@ pkill -9 -f "node.*feishu-bridge" 2>/dev/null || true
 pkill -9 -f "node.*bridge\.js" 2>/dev/null || true
 sleep 1
 
-install_plist() {
-  local name="$1" script="$2"
-  local plist="$LAUNCH_AGENTS/$name.plist"
-  cat > "$plist" << EOF
+# 清理历史版本遗留的服务形态(避免双服务/Node.js Foundation 登录项):
+#   com.dsh.feishu-bridge : 旧 install.sh 直接跑 node 的形态(登录项显示为 Node.js Foundation)
+#   com.dsh.monitor / com.dsh.daily-summary : 旧独立 launchd 定时项(定时任务已内置桥)
+for legacy in com.dsh.feishu-bridge com.dsh.monitor com.dsh.daily-summary; do
+  legacy_plist="$LAUNCH_AGENTS/$legacy.plist"
+  if [ -f "$legacy_plist" ]; then
+    /bin/launchctl unload "$legacy_plist" 2>/dev/null || true
+    /bin/rm -f "$legacy_plist"
+    echo "  ✅ 已清理旧服务 $legacy"
+  fi
+done
+
+# 桥守护用 .app 包装形态:登录项显示「DSH feishu」而非 Node.js Foundation。
+# wrapper 用动态路径(相对自身定位),项目移动目录/换机器仍可用。
+APP_NAME="DSH feishu"
+APP_BIN="$DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+mkdir -p "$DIR/$APP_NAME.app/Contents/MacOS"
+cat > "$APP_BIN" << EOF
+#!/bin/bash
+# DSH feishu 桥启动器(由 install.sh 生成,路径动态解析)
+APP_DIR="\$(cd "\$(dirname "\$0")/../../.." && pwd)"
+exec $NODE_BIN "\$APP_DIR/feishu-bridge.js"
+EOF
+chmod +x "$APP_BIN"
+
+plist="$LAUNCH_AGENTS/com.dsh.feishu.plist"
+cat > "$plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$name</string>
+  <key>Label</key><string>com.dsh.feishu</string>
   <key>ProgramArguments</key>
-  <array><string>$NODE_BIN</string><string>$DIR/$script</string></array>
+  <array><string>$APP_BIN</string></array>
   <key>WorkingDirectory</key><string>$DIR</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/$name.log</string>
-  <key>StandardErrorPath</key><string>/tmp/$name.err.log</string>
+  <key>StandardOutPath</key><string>$DIR/bridge/feishu-bridge.log</string>
+  <key>StandardErrorPath</key><string>$DIR/bridge/feishu-bridge.log</string>
 </dict>
 </plist>
 EOF
-  /bin/launchctl unload "$plist" 2>/dev/null || true
-  /bin/launchctl load "$plist" 2>/dev/null && echo "  ✅ $name 守护已安装并启动" || echo "  ⚠️ $name 加载失败(可手动: launchctl load $plist)"
-}
-
-# 飞书桥(主通道)
-install_plist "com.dsh.feishu-bridge" "feishu-bridge.js"
-# 邮件桥默认不安装(备用通道,如需启用: install_plist "com.dsh.mail-bridge" "bridge.js" 并重启)
+/bin/launchctl unload "$plist" 2>/dev/null || true
+/bin/launchctl load "$plist" 2>/dev/null && echo "  ✅ com.dsh.feishu 守护已安装并启动" || echo "  ⚠️ 加载失败(可手动: launchctl load $plist)"
+# 邮件桥默认不安装(备用通道,如需启用: 参照上面自建 com.dsh.mail-bridge 并指向 bridge.js,重启生效)
 
 # ---------- 6. 队列清理 + 心跳 ----------
 echo ""
@@ -128,7 +147,7 @@ sleep 3
 if pgrep -f "node.*feishu-bridge" >/dev/null 2>&1; then
   echo "  ✅ 飞书桥运行中"
 else
-  echo "  ⚠️ 飞书桥未运行(查看 /tmp/com.dsh.feishu-bridge.log)"
+  echo "  ⚠️ 飞书桥未运行(查看 /tmp/feishu-bridge.log)"
 fi
 if curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:3080/ 2>/dev/null | grep -q 200; then
   echo "  ✅ DSH 运行中(端口 3080)"
@@ -144,7 +163,7 @@ echo ""
 echo "=============================================="
 echo " 安装完成!"
 echo " - 飞书桥: launchctl list | grep dsh"
-echo " - 日志:   /tmp/com.dsh.feishu-bridge.log"
+echo " - 日志:   /tmp/feishu-bridge.log(桥自身)"
 echo " - 部署文档: $DIR/DEPLOY.md"
 echo " 注意: 若 DSH 插件为新增注册,需重启 DSH 生效"
 echo "=============================================="

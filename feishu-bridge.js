@@ -418,9 +418,15 @@ async function sendText(chatId, text) {
 
 const sendFail = new Map(); // 文件名 -> 连续发送失败次数(防无限重试)
 // 已成功发送过的文件:发送成功但删除失败时(如受限运行环境),同进程内跳过,防重复轰炸
-const sentOk = new Set();
+// 记录带时间戳,超过24h自动清理(正常路径文件早被删除,条目只是兜底记忆,不无限增长)
+const sentOk = new Map();
+function pruneSentOk() {
+  const day = 24 * 60 * 60 * 1000;
+  for (const [f, t] of sentOk) if (Date.now() - t > day) sentOk.delete(f);
+}
 
 async function drainQueue() {
+  pruneSentOk();
   let files;
   try { files = fs.readdirSync(IN_DIR); } catch { return; }
   for (const f of files) {
@@ -468,7 +474,7 @@ async function drainQueue() {
       if (sentOk.has(f)) continue;
       const ok = await sendText(state.chatId, state.reply || "(无回复)");
       if (ok) {
-        sentOk.add(f);
+        sentOk.set(f, Date.now());
         try { fs.unlinkSync(fp); } catch { console.error("[feishu] 回复已发送但队列文件删除失败,本进程内跳过重发: " + f); }
         sendFail.delete(f);
       } else {
@@ -483,7 +489,7 @@ async function drainQueue() {
     } else if (state.status === "error") {
       if (sentOk.has(f)) continue;
       if (await sendText(state.chatId, "处理出错: " + (state.error || "未知错误"))) {
-        sentOk.add(f);
+        sentOk.set(f, Date.now());
         try { fs.unlinkSync(fp); } catch {}
       }
     }

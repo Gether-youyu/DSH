@@ -7,6 +7,7 @@ bridge/feishu.json
 bridge/in/
 bridge/state.json
 bridge/feishu-target.json
+bridge/schedule-state.json
 bridge/*.log
 
 # 依赖与发布包

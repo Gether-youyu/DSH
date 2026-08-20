@@ -43,7 +43,7 @@ cp config.example.json config.json
 #   - daily.recipient: 接收每日总结的邮箱
 #   - notify.alertChatId: 可留空(监控告警可选)
 
-# 3. 一键安装(自动:装SDK/注册DSH插件/挂cron/装守护/自检)
+# 3. 一键安装(自动:装SDK/注册DSH插件/装守护/自检;定时任务随桥内置,无需 cron)
 bash install.sh
 
 # 4. 重启 DSH 使插件生效:
@@ -75,9 +75,10 @@ bash install.sh
 
 | 事项 | 方法 |
 |---|---|
-| 飞书桥日志 | 桥自身 `/tmp/feishu-bridge.log`;launchd 重定向 `/tmp/com.dsh.feishu-bridge.log`(install.sh) |
-| 桥崩溃自愈 | launchd 守护自动重启(com.dsh.feishu-bridge) |
-| 运行监控 | cron 每分钟跑 monitor.js,异常发飞书告警 |
+| 飞书桥日志 | 桥自身 `/tmp/feishu-bridge.log`(始终有效);launchd 重定向 `bridge/feishu-bridge.log` |
+| 桥崩溃自愈 | launchd 守护自动重启(com.dsh.feishu) |
+| 运行监控 | 桥内置调度每分钟拉起 monitor.js,异常发飞书告警 |
+| 每日总结 | 桥内置调度每日 19:59 拉起 daily-summary.js(补跑窗口至 23:59,当日只发一次) |
 | 队列清理 | 卡死文件 10 分钟自动回收重试,3 次放弃 |
 | 每日推送日志 | `cat /tmp/daily-summary.log` |
 
@@ -88,6 +89,7 @@ bash install.sh
 3. **私聊不推送**:确认开了 `im:message.p2p_msg:readonly` 并重新发布
 4. **DSH 重启后插件丢失**:确认 `cordis.patch.yml` 有 mailbridge insert(install.sh 已处理)
 5. **告警没发**:config.json 的 `notify.alertChatId` 留空则跳过告警
+6. **登录项显示异常**:正常应只有「DSH」「DSH feishu」;若出现「Node.js Foundation」等旧项,重跑 `bash install.sh` 会自动清理旧服务;若旧开关仍删不掉,执行 `sudo sfltool resetbtm` 并重启(注意:会重置所有后台项的开关状态,需手动关回不需要的)
 
 ## 七、目录结构
 

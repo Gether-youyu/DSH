@@ -19,10 +19,12 @@ echo "=============================================="
 
 # ---------- 1. 停止并移除 launchd 守护 ----------
 echo "[1/4] 停止守护服务..."
-for name in com.dsh.feishu-bridge com.dsh.mail-bridge com.dsh.feishu; do
+# 含历史版本遗留的服务名(feishu-bridge/monitor/daily-summary 为旧形态)
+for name in com.dsh.feishu com.dsh.feishu-bridge com.dsh.mail-bridge com.dsh.monitor com.dsh.daily-summary; do
   plist="$LAUNCH_AGENTS/$name.plist"
   if [ -f "$plist" ]; then
     /bin/launchctl unload "$plist" 2>/dev/null || true
+    /bin/rm -f "$plist"
     echo "  ✅ 已停止并移除 $name"
   fi
 done
@@ -31,10 +33,10 @@ pkill -9 -f "node.*feishu-bridge" 2>/dev/null || true
 pkill -9 -f "node.*bridge\.js" 2>/dev/null || true
 echo "  ✅ 桥进程已停止"
 
-# ---------- 2. 移除 cron 定时 ----------
-echo "[2/4] 移除定时任务..."
+# ---------- 2. 移除 cron 定时(历史版本遗留;新版本定时任务内置桥进程,随桥停止) ----------
+echo "[2/4] 清理定时任务..."
 /usr/bin/crontab -l 2>/dev/null | grep -v "daily-summary.js" | grep -v "monitor.js" | /usr/bin/crontab - 2>/dev/null || true
-echo "  ✅ cron 已清理(daily-summary / monitor)"
+echo "  ✅ 旧 cron 已清理(如有)"
 
 # ---------- 3. 移除 DSH 插件注册 ----------
 echo "[3/4] 移除 DSH 插件注册..."
@@ -82,6 +84,7 @@ fi
 # ---------- 4. 清理运行时文件 ----------
 echo "[4/4] 清理运行时文件..."
 rm -f "$DIR/bridge/in/"*.json 2>/dev/null || true
+rm -f "$DIR/bridge/schedule-state.json" 2>/dev/null || true
 rm -f /tmp/dsh-heartbeat 2>/dev/null || true
 echo "  ✅ 队列与心跳已清理"
 
@@ -90,4 +93,6 @@ echo "=============================================="
 echo " 卸载完成。项目文件与 config.json 已保留。"
 echo " 重新安装: bash install.sh"
 echo " 彻底删除: rm -rf $DIR"
+echo " 提示: 若系统设置登录项仍显示残留开关,"
+echo "       执行 sudo sfltool resetbtm 并重启即可清除"
 echo "=============================================="

@@ -34,7 +34,7 @@ cp config.example.json config.json
 #   - mail.*: 邮箱与授权码
 #   - daily.recipient: 接收每日总结的邮箱
 
-# 3. 一键安装(自动:装SDK/注册DSH插件/挂cron/装守护/自检)
+# 3. 一键安装(自动:装SDK/注册DSH插件/装守护/自检;定时任务随桥内置,无需 cron)
 bash install.sh
 
 # 4. 重启 DSH(使插件生效):
@@ -72,13 +72,14 @@ kill $(lsof -tiTCP:3080 -sTCP:LISTEN)   # 系统自动拉起
 ## 架构
 
 ```
-手机飞书 ──→ feishu-bridge.js(长连接/命令/心跳)
-手机邮件 ──→ bridge.js(IMAP/SMTP,已内置,默认未启用;install.sh 默认不安装,如需启用见 install.sh 注释)
-每日19:59 ─→ daily-summary.js(cron)
+手机飞书 ──-> feishu-bridge.js(长连接/命令/心跳/内置定时调度)
+手机邮件 ──-> bridge.js(IMAP/SMTP,已内置,默认未启用;install.sh 默认不安装,如需启用见 install.sh 注释)
+每日19:59 ─-> daily-summary.js(桥内置调度拉起)
+每分钟   ──> monitor.js(桥内置调度拉起)
         ↘ 文件队列 bridge/in/ ↗
-        → mailbridge-plugin.js(DSH 进程内)
+        -> mailbridge-plugin.js(DSH 进程内)
           消息注入会话 / 任务切换 / 模型选择 / 停·继续 / 审批桥 / 30秒提示
-        → 回复写回队列 → 桥发送 → 飞书/邮件
+        -> 回复写回队列 -> 桥发送 -> 飞书/邮件
 ```
 
 ## 项目结构
@@ -106,16 +107,16 @@ dsh-mobile/
 
 | 事项 | 方法 |
 |---|---|
-| 桥日志 | 桥自身: `/tmp/feishu-bridge.log`;launchd 重定向: `/tmp/com.dsh.feishu-bridge.log`(install.sh) 或 `bridge/feishu-bridge.log`(手动部署) |
+| 桥日志 | 桥自身: `/tmp/feishu-bridge.log`(始终有效);launchd 重定向: `bridge/feishu-bridge.log` |
 | 桥崩溃 | launchd KeepAlive 自动重启 |
-| 监控告警 | cron 每分钟,异常发飞书 |
+| 监控告警 | 桥内置调度每分钟拉起 monitor.js,异常发飞书 |
 | 每日推送日志 | `/tmp/daily-summary.log` |
 
 ## 版本与卸载
 
-- 当前版本: `v0.1`(更新记录见 CHANGELOG.md)
-- 卸载:`bash uninstall.sh`(移除守护/cron/插件注册,保留项目文件)
-- 发布包:`dsh-mobile-v0.1.zip`(解压 → 配置 → install.sh)
+- 当前版本: `v0.2`(更新记录见 CHANGELOG.md)
+- 卸载:`bash uninstall.sh`(移除守护/旧cron/插件注册,保留项目文件)
+- 发布包:zip 为 v0.1 时期产物已过期,分发前请重新打包
 
 ## 常见问题
 
@@ -123,6 +124,7 @@ dsh-mobile/
 - **私聊无事件**:没开 `im:message.p2p_msg:readonly` 或未重新发布
 - **回复收不到**:`launchctl list | grep dsh` 看桥是否运行;日志 `/tmp/feishu-bridge.log`(桥自身,始终有效)
 - **审批不弹**:确认 DSH 已重启(插件 v12+ 生效)
+- **登录项异常**:正常应只有「DSH」「DSH feishu」两项;若见「Node.js Foundation」等旧项,重跑 `bash install.sh` 自动清理;若开关删不掉,`sudo sfltool resetbtm` 后重启(代价:所有后台项开关状态重置,需手动关回不要的)
 
 ## 许可
 
