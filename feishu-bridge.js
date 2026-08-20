@@ -363,6 +363,8 @@ async function sendText(chatId, text) {
   }
 }
 
+const sendFail = new Map(); // 文件名 -> 连续发送失败次数(防无限重试)
+
 async function drainQueue() {
   let files;
   try { files = fs.readdirSync(IN_DIR); } catch { return; }
@@ -402,8 +404,25 @@ async function drainQueue() {
           console.log("[feishu] 模型切换失败(保留 pendingModel 供重选): " + replyText.slice(0, 40));
         }
       }
+      // 发送防抖:非法会话ID立即放弃;合法ID连续失败20次(约1分钟)后放弃,避免无限重试轰炸API
+      if (!/^(oc_|ou_|om_)/.test(String(state.chatId || ""))) {
+        console.log("[feishu] 非法会话ID,放弃投递: " + f + " chat=" + state.chatId);
+        try { fs.renameSync(fp, fp + ".dead"); } catch { try { fs.unlinkSync(fp); } catch {} }
+        continue;
+      }
       const ok = await sendText(state.chatId, state.reply || "(无回复)");
-      if (ok) { try { fs.unlinkSync(fp); } catch {} }
+      if (ok) {
+        try { fs.unlinkSync(fp); } catch {}
+        sendFail.delete(f);
+      } else {
+        const n = (sendFail.get(f) || 0) + 1;
+        sendFail.set(f, n);
+        if (n >= 20) {
+          console.log("[feishu] 连续" + n + "次发送失败,放弃投递: " + f + " chat=" + state.chatId);
+          try { fs.renameSync(fp, fp + ".dead"); } catch { try { fs.unlinkSync(fp); } catch {} }
+          sendFail.delete(f);
+        }
+      }
     } else if (state.status === "error") {
       await sendText(state.chatId, "处理出错: " + (state.error || "未知错误"));
       try { fs.unlinkSync(fp); } catch {}

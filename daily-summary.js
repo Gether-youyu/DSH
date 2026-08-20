@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * DSH 每日邮件提醒 —— 每天 19:59 由 cron 触发。
+ * DSH 每日邮件提醒 —— 每天 19:59 由 launchd(com.dsh.daily-summary) 触发。
  * 直接统计会话文件当天活动(只解析时间/轮次元数据,不读对话正文),
  * 总结当天 0 点至执行前的用户活动,用 DeepSeek 生成生动总结,SMTP 发送。
  */
@@ -32,17 +32,50 @@ const PASS = (cfg && cfg.smtp && cfg.smtp.pass) || "";
 const SMTP_HOST = (cfg && cfg.smtp && cfg.smtp.host) || "smtp.qq.com";
 const SMTP_PORT = (cfg && cfg.smtp && cfg.smtp.port) || 465;
 
-function getApiKey() {
+function readCredential(name, envName) {
   // DSH 设置页凭据(~/.dsh/.credentials.yaml,Models 页写入)
   try {
     const c = fs.readFileSync(HOME + "/.dsh/.credentials.yaml", "utf8");
-    const m = c.match(/DEEPSEEK_API_KEY:\s*["\x27]?([^"\x27\s]+)/);
-    if (m) return m[1].replace(/["\x27]/g, "");
+    for (const line of c.split("\n")) {
+      const i = line.indexOf(name + ":");
+      if (i === -1) continue;
+      const v = line.slice(i + name.length + 1).trim().replace(/^["\x27]|["\x27]$/g, "");
+      if (v) return v;
+    }
   } catch (e) {}
-  // 环境变量兜底(手动启动 dsh 时可用)
-  return process.env.DEEPSEEK_API_KEY || "";
+  return process.env[envName] || "";
 }
-const API_KEY = getApiKey();
+// ---------- AI 总结:模型与密钥统一走 DSH 设置(单一配置来源,不在脚本里指定模型) ----------
+// 端点表是公开常量;provider/model 与 key 全部来自 DSH 设置页:
+//   模型:~/.dsh/settings.yaml 的 agent-default-model(设置页选择默认模型时写入)
+//   密钥:~/.dsh/.credentials.yaml(设置页 Models 页写入)
+const PROVIDER_ENDPOINTS = {
+  "deepseek-official": { name: "DeepSeek官方", hostname: "api.deepseek.com", path: "/chat/completions" },
+  "ark-code-latest": { name: "方舟", hostname: "ark.cn-beijing.volces.com", path: "/api/plan/v3/chat/completions" },
+};
+const PROVIDER_KEYS = {
+  "deepseek-official": "DEEPSEEK_API_KEY",
+  "ark-code-latest": "ARK_CODE_LATEST_API_KEY",
+};
+function readDshDefaultModel() {
+  // 解析 ~/.dsh/settings.yaml 的 agent-default-model 两行缩进块
+  try {
+    const s = fs.readFileSync(HOME + "/.dsh/settings.yaml", "utf8");
+    const m = s.match(/agent-default-model:\s*\n\s*provider:\s*([^\s#]+)\s*\n\s*model:\s*([^\s#]+)/);
+    if (m) return { provider: m[1], model: m[2] };
+  } catch (e) {}
+  return null;
+}
+function currentProvider() {
+  const sel = readDshDefaultModel();
+  if (!sel) return { error: "未读取到 DSH 设置的默认模型(请在 DSH 设置页选择默认模型)" };
+  const ep = PROVIDER_ENDPOINTS[sel.provider];
+  if (!ep) return { error: "DSH 设置的渠道「" + sel.provider + "」暂无端点映射" };
+  const keyName = PROVIDER_KEYS[sel.provider] || (sel.provider.toUpperCase().replace(/-/g, "_") + "_API_KEY");
+  const apiKey = readCredential(keyName, keyName);
+  if (!apiKey) return { error: "渠道「" + sel.provider + "」未配置密钥(请在 DSH 设置页配置)" };
+  return { name: ep.name + "/" + sel.model, hostname: ep.hostname, path: ep.path, model: sel.model, apiKey };
+}
 
 // ---------- 读取会话文件,统计当天真实活动(只解析元数据行,不碰对话正文) ----------
 const { execFileSync } = require("child_process");
@@ -71,20 +104,24 @@ function analyzeToday(fp, startOfDay, nowMs) {
   const raw = readZstdSession(fp);
   if (!raw) return null;
   const times = [];
-  let turns = 0, steps = 0;
+  let turns = 0, steps = 0, lastTurnError = false;
   for (const line of raw.split("\n")) {
     if (!line) continue;
     try {
       const o = JSON.parse(line);
       if (!o.time || o.time < startOfDay || o.time > nowMs) continue;
       times.push(o.time);
-      if (o.type === "turn/start") turns++;
+      if (o.type === "turn/start") { turns++; lastTurnError = false; }
       if (o.type === "step/start") steps++;
+      // 记录最近一次回合的结束状态:以报错结束不算"仍在干活"
+      if (o.type === "turn/end") {
+        lastTurnError = !!(o.data && o.data.reason && o.data.reason.kind === "error");
+      }
     } catch (e) {}
   }
   if (!times.length) return null;
   times.sort((a, b) => a - b);
-  return { firstAt: times[0], lastAt: times[times.length - 1], times, turns, steps };
+  return { firstAt: times[0], lastAt: times[times.length - 1], times, turns, steps, lastTurnError };
 }
 function readMemory() {
   const proj = JSON.parse(fs.readFileSync(HOME + "/.dsh/storages/session_projcache.json", "utf8"));
@@ -116,11 +153,11 @@ function readMemory() {
   return { today, now, startOfDay };
 }
 
-// ---------- DeepSeek 总结 ----------
-function callDeepSeek(prompt) {
+// ---------- AI 总结(走 DSH 设置所选模型,错误显式报出) ----------
+function callLlm(p, prompt) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
-      model: "deepseek-chat",
+      model: p.model,
       messages: [
         { role: "system", content: "你是一个温暖、生动、有情绪的中文助手,擅长用简洁有感染力的语言总结用户的工作。" },
         { role: "user", content: prompt },
@@ -128,12 +165,12 @@ function callDeepSeek(prompt) {
       max_tokens: 800,
     });
     const req = https.request({
-      hostname: "api.deepseek.com",
-      path: "/chat/completions",
+      hostname: p.hostname,
+      path: p.path,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": "Bearer " + API_KEY,
+        "Authorization": "Bearer " + p.apiKey,
         "Content-Length": Buffer.byteLength(body),
       },
     }, (res) => {
@@ -142,7 +179,13 @@ function callDeepSeek(prompt) {
       res.on("end", () => {
         try {
           const j = JSON.parse(data);
-          resolve((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "");
+          // 服务端报错(欠费/限流/鉴权)必须 reject,禁止把"没内容"静默当"空内容"
+          if (j.error && j.error.message) {
+            return reject(new Error(j.error.message + (j.error.code ? "(" + j.error.code + ")" : "")));
+          }
+          const text = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+          if (!text.trim()) return reject(new Error("空响应"));
+          resolve(text);
         } catch (e) { reject(new Error("解析失败: " + data.slice(0, 200))); }
       });
     });
@@ -151,6 +194,12 @@ function callDeepSeek(prompt) {
     req.write(body);
     req.end();
   });
+}
+async function generateSummary(prompt) {
+  // 单一渠道:DSH 设置页当前选定的默认模型;失败如实报错,不做隐藏降级
+  const p = currentProvider();
+  if (p.error) throw new Error(p.error);
+  return await callLlm(p, prompt);
 }
 
 // ---------- SMTP 发送 ----------
@@ -220,7 +269,12 @@ async function main() {
       workHours = activeMs / 3600000;
     }
   }
-  const stillWorking = today.length > 0 && (now.getTime() - Math.max(...today.map((t) => t.lastAt))) < 30 * 60 * 1000;
+  // "仍在工作"必须同时满足:30分钟内有活动 且 最近一次回合正常结束(报错结束不算)
+  let lastSess = null;
+  for (const t of today) if (!lastSess || t.lastAt > lastSess.lastAt) lastSess = t;
+  const recentActive = !!lastSess && (now.getTime() - lastSess.lastAt) < 30 * 60 * 1000;
+  const stillWorking = recentActive && !lastSess.lastTurnError;
+  const endedWithError = recentActive && !!lastSess.lastTurnError;
 
   // 活动清单
   const items = today.map((t) => {
@@ -231,18 +285,19 @@ async function main() {
     return "- [" + ts + "-" + ts2 + "] " + (t.title || "未命名任务") + "(" + t.turns + "轮)";
   }).join("\n") || "(今天暂无记录)";
 
-  // 生成总结
+  // 生成总结(走 DSH 设置的默认模型;失败时明示原因,不再静默发空正文)
   let summary = "";
   try {
     const prompt =
       "今天是" + dateStr + ",以下是用户今天0点至今在DSH上做的事情(来自会话索引和统计):\n" + items +
       "\n\n累计活跃计算时长约 " + workHours.toFixed(1) + " 小时。" +
       (stillWorking ? "用户现在可能仍在工作。" : "") +
+      (endedWithError ? "注意:最近一次活动以报错结束。" : "") +
       "\n请用简洁生动、有情绪的中文总结用户今天做了什么,语气亲切,可以适度夸奖用户。" +
       (workHours > 6 || stillWorking ? "最后提醒用户:今天辛苦了,放松一下,早点休息!" : "");
-    summary = await callDeepSeek(prompt);
+    summary = await generateSummary(prompt);
   } catch (e) {
-    summary = "总结生成失败,以下是原始记录:\n" + items;
+    summary = "AI总结生成失败(" + ((e && e.message) || e) + "),以下是原始记录:\n" + items;
   }
 
   // 邮件正文
@@ -251,7 +306,7 @@ async function main() {
     summary + "\n\n" +
     "——\n今日活动记录:\n" + items +
     "\n活跃计算时长: " + workHours.toFixed(1) + " 小时" +
-    (stillWorking ? "(仍在工作中)" : "");
+    (stillWorking ? "(仍在工作中)" : endedWithError ? "(最近一次活动以报错结束)" : "");
 
   const subject = "DSH提醒 " + dateStr;
   await smtpSend(RECIPIENT, subject, body);

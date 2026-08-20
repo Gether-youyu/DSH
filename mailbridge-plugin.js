@@ -236,16 +236,109 @@ module.exports = {
     }
 
 
+    // 创建全新会话并切换桥的 pin:用于会话上下文被污染(DSML 泄漏/超长历史)时干净重启
+    // 走官方 apiProxy session.create(自动挂预设+注册工作区),再改名并更新 feishu-target.json
+    async function sessionNewCmd(req) {
+      const apiProxy = ctx.get('apiProxy');
+      if (!apiProxy || !apiProxy.sessions || typeof apiProxy.sessions.create !== 'function') {
+        return { text: '❌ 会话创建通道不可用' };
+      }
+      const payload = {};
+      if (req.workspaceId) payload.workspaceId = req.workspaceId;
+      else if (req.cwd) payload.cwd = req.cwd;
+      const res = await apiProxy.sessions.create({ payload });
+      const okFlag = !!(res && res.result && res.result.ok === true);
+      if (!okFlag) {
+        const errInfo = (res && res.result && res.result.error) ? (res.result.error.message || JSON.stringify(res.result.error)) : '未知错误';
+        return { text: '❌ 创建会话失败: ' + errInfo };
+      }
+      const newSid = res.result.value && res.result.value.sessionId;
+      if (!newSid) return { text: '❌ 创建会话失败: 返回无 sessionId' };
+      if (req.title && apiProxy.sessions && typeof apiProxy.sessions.rename === 'function') {
+        try { await apiProxy.sessions.rename({ payload: { sessionId: newSid, title: req.title } }); } catch (e) {
+          console.error('[mailbridge] 新会话命名失败: ' + ((e && e.message) || e));
+        }
+      }
+      let pin = {};
+      try { pin = JSON.parse(await fs.readText(await fs.resolve(BASE + '/feishu-target.json'))); } catch (e) {}
+      pin.mode = 'pinned';
+      pin.sessionId = newSid;
+      if (req.title) pin.label = req.title;
+      if (!pin.wsName) pin.wsName = 'DSH永不眠';
+      try {
+        await fs.writeText(await fs.resolve(BASE + '/feishu-target.json'), JSON.stringify(pin, null, 1));
+      } catch (e) {
+        return { text: '✅ 会话已创建(' + newSid + ')但 pin 更新失败: ' + ((e && e.message) || e) };
+      }
+      return { text: '✅ 已创建新会话并切换: ' + (req.title || newSid) + '\n后续消息将进入干净的新会话。' };
+    }
+
     async function handleCommand(req) {
       try {
+        if (req.command === 'session-new') return await sessionNewCmd(req);
         if (req.command === 'task-list') return await listTasks();
         if (req.command === 'task-select') return await selectTask(req);
         if (req.command === 'model-list') return await listModelsCmd();
         if (req.command === 'model-select') return await selectModel(req);
+      if (req.command === 'tool-check') return await toolCheckCmd(req);
       } catch (e) {
         return { text: '命令处理出错: ' + ((e && e.message) || e) };
       }
       return { text: '未知命令' };
+    }
+
+    async function toolCheckCmd(req) {
+      const out = {};
+      try {
+        const tools = ctx.get('tools');
+        out.defaultMode = tools.defaultMode;
+        out.globalBash = !!tools.get('bash');
+        try { out.globalView = [...tools.view().visible.keys()].join(',').slice(0, 500); } catch (e) { out.globalViewErr = String(e).slice(0, 100); }
+      } catch (e) { out.toolsErr = String(e).slice(0, 150); }
+      try {
+        const sid = (req && req.targetSession) || '';
+        const ag = sid ? await agentForSession(sid) : null;
+        if (ag) {
+          out.agentId = ag.id;
+          out.preset = ag.session && ag.session.header && ag.session.header.agentPreset;
+          const tools = ctx.get('tools');
+          out.agentMode = tools.modeFor(ag);
+          out.agentBash = !!tools.get('bash', ag);
+          try { out.agentView = [...tools.view(ag).visible.keys()].join(',').slice(0, 500); } catch (e) { out.agentViewErr = String(e).slice(0, 100); }
+        } else { out.agentErr = 'no sid'; }
+      } catch (e) { out.agentErr = String(e).slice(0, 150); }
+      try { fs.writeText(await fs.resolve('/tmp/toolcheck.json'), JSON.stringify(out, null, 1)); } catch (e) {}
+      console.log('[mailbridge] tool-check: ' + JSON.stringify(out).slice(0, 600));
+      return { text: '工具诊断已写入 /tmp/toolcheck.json' };
+    }
+
+    // 预设挂载回调:DSH Web 版的工具全部由 agent preset 提供(roster 挂载),
+    // 直接 agents.resume 不带 setup 的 agent 不在任何预设作用域,工具注册表为空,
+    // 表现为 "unknown tool bash"。按 apiproxy composeAgent 同款逻辑补挂:
+    // 取会话最近一次 agent-preset/selected 事件(无则读 header),mount 到 agent 作用域。
+    function presetSetup() {
+      const presets = ctx.get('agentPresets');
+      if (!presets) return undefined;
+      return async (agentCtx) => {
+        let presetId;
+        try {
+          const ag = agentCtx && agentCtx.agent;
+          if (ag && ag.session) {
+            const events = ag.session.events || [];
+            for (let i = events.length - 1; i >= 0; i--) {
+              const ev = events[i];
+              if (ev && ev.type === 'agent-preset/selected' && ev.data && ev.data.agentPreset) {
+                presetId = ev.data.agentPreset;
+                break;
+              }
+            }
+            if (presetId === undefined) {
+              presetId = ag.session.header && ag.session.header.agentPreset;
+            }
+          }
+        } catch (e) {}
+        await presets.mount(agentCtx, presetId);
+      };
     }
 
     async function agentForSession(sessionId) {
@@ -256,6 +349,7 @@ module.exports = {
       const handle = await agents.resume({
         resumeSessionId: sessionId,
         agentOptions: { provider: sel.provider, model: sel.model },
+        setup: presetSetup(),
       });
       return handle.agent;
     }
@@ -287,13 +381,14 @@ module.exports = {
       const sel = model.currentSelection();
       const agentOptions = { provider: sel.provider, model: sel.model };
       try {
-        const handle = await agents.resume({ resumeSessionId: FALLBACK_SESSION, agentOptions });
+        const handle = await agents.resume({ resumeSessionId: FALLBACK_SESSION, agentOptions, setup: presetSetup() });
         fallbackAgent = handle.agent;
       } catch (e) {
         const handle = await agents.create({
           sessionId: FALLBACK_SESSION,
           meta: { cwd: '/' },
           agentOptions,
+          setup: presetSetup(),
         });
         fallbackAgent = handle.agent;
       }
@@ -478,7 +573,16 @@ module.exports = {
         }
         disposePrompt();
         await sessions.flush(agent.session);
-        const reply = summarize(agent.session.events, firstSeq) || '(处理超时,请稍后在电脑端查看)';
+        // 回合以报错结束时必须如实告知错误,不得一律误导为"处理超时"
+        let turnErr = null;
+        for (const e of (agent.session.events || [])) {
+          if (e.seq < firstSeq || e.type !== 'turn/end') continue;
+          const r = e.data && e.data.reason;
+          if (r && r.kind === 'error') turnErr = String((r.error && (r.error.message || r.error)) || '未知错误').slice(0, 300);
+        }
+        let reply = summarize(agent.session.events, firstSeq);
+        if (turnErr) reply = reply ? reply + '\n\n⚠️ 本次任务最后报错: ' + turnErr : '❌ 任务执行失败: ' + turnErr;
+        if (!reply) reply = '(处理超时,请稍后在电脑端查看)';
         await fs.writeText(target, JSON.stringify({ ...req, status: 'done', reply }));
         console.log('[mailbridge] 已回复 ' + fileName);
       } catch (err) {

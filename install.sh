@@ -2,8 +2,8 @@
 # ============================================================
 # DSH永不眠一键安装脚本
 # 用法: bash install.sh
-# 作用: 检测环境 -> 生成配置 -> 注册 DSH 插件 -> 挂 cron
-#       -> 安装 launchd 守护 -> 启动服务 -> 自检
+# 作用: 检测环境 -> 生成配置 -> 注册 DSH 插件 -> 定时任务迁 launchd
+#       -> 安装 launchd 守护 -> 启动服务 -> 自检(定时任务同走 launchd)
 # ============================================================
 set -e
 
@@ -68,23 +68,10 @@ else
   echo "  ⚠️ 未找到 $PATCH_FILE,请确认 DSH web profile 存在"
 fi
 
-# ---------- 4. 挂 cron(每日总结 + 监控) ----------
+# ---------- 4. 定时任务(launchd 托管,替代旧 cron) ----------
 echo ""
-echo "[4/7] 配置定时任务(每日总结 19:59 + 监控每分钟)..."
-CRON_LINE="59 19 * * * $NODE_BIN $DIR/daily-summary.js >> /tmp/daily-summary.log 2>&1"
-if /usr/bin/crontab -l 2>/dev/null | grep -q "daily-summary.js"; then
-  echo "  ✅ 每日总结 cron 已存在"
-else
-  ( /usr/bin/crontab -l 2>/dev/null; echo "$CRON_LINE" ) | /usr/bin/crontab -
-  echo "  ✅ 每日总结 cron 已添加: 59 19 * * *"
-fi
-MONITOR_LINE="* * * * * $NODE_BIN $DIR/monitor.js >> /tmp/dsh-monitor.log 2>&1"
-if /usr/bin/crontab -l 2>/dev/null | grep -q "monitor.js"; then
-  echo "  ✅ 监控 cron 已存在"
-else
-  ( /usr/bin/crontab -l 2>/dev/null; echo "$MONITOR_LINE" ) | /usr/bin/crontab -
-  echo "  ✅ 监控 cron 已添加: 每分钟"
-fi
+echo "[4/7] 配置定时任务(每日总结 19:59 + 监控每分钟,launchd 托管)..."
+bash "$DIR/migrate-launchd.sh"
 
 # ---------- 5. launchd 守护(桥自动重启) ----------
 echo ""
