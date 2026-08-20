@@ -24,8 +24,9 @@
 **前提**:Mac + Node.js ≥22 + DSH(web 模式运行中)+ 一个支持 IMAP/SMTP 的邮箱
 
 ```bash
-# 1. 解压本项目
-unzip dsh-mobile-v0.1.zip && cd dsh-mobile
+# 1. 获取项目到任意目录(二选一):git clone 本项目仓库 / 解压项目包
+#    以下假设项目目录为 ~/dsh-mobile
+cd ~/dsh-mobile
 
 # 2. 复制配置模板并填写(唯一要改的文件)
 cp config.example.json config.json
