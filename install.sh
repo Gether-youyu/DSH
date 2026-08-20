@@ -2,8 +2,8 @@
 # ============================================================
 # DSH永不眠一键安装脚本
 # 用法: bash install.sh
-# 作用: 检测环境 -> 生成配置 -> 注册 DSH 插件 -> 定时任务迁 launchd
-#       -> 安装 launchd 守护 -> 启动服务 -> 自检(定时任务同走 launchd)
+# 作用: 检测环境 -> 生成配置 -> 注册 DSH 插件 -> 定时任务内置飞书桥
+#       -> 安装 launchd 守护 -> 启动服务 -> 自检
 # ============================================================
 set -e
 
@@ -68,10 +68,16 @@ else
   echo "  ⚠️ 未找到 $PATCH_FILE,请确认 DSH web profile 存在"
 fi
 
-# ---------- 4. 定时任务(launchd 托管,替代旧 cron) ----------
+# ---------- 4. 定时任务(内置调度,随飞书桥运行,无系统定时项) ----------
 echo ""
-echo "[4/7] 配置定时任务(每日总结 19:59 + 监控每分钟,launchd 托管)..."
-bash "$DIR/migrate-launchd.sh"
+echo "[4/7] 定时任务已内置飞书桥(监控每分钟 + 每日总结 19:59),无需系统 cron/launchd 定时项"
+# 清理历史版本的 cron 条目(老安装方式遗留;无可清理时静默跳过)
+if /usr/bin/crontab -l 2>/dev/null | grep -qE "daily-summary\.js|monitor\.js"; then
+  /usr/bin/crontab -l 2>/dev/null | grep -vE "daily-summary\.js|monitor\.js" | /usr/bin/crontab - \
+    && echo "  ✅ 已清理旧 cron 条目" || echo "  ⚠️ 旧 cron 清理失败,可手动: crontab -e 删除相关行"
+else
+  echo "  ✅ 无旧 cron 需要清理"
+fi
 
 # ---------- 5. launchd 守护(桥自动重启) ----------
 echo ""

@@ -2,6 +2,7 @@
 // 由 ~/.dsh/profiles/web/cordis.patch.yml 通过绝对路径加载
 // 功能:任务切换(targetSession)+ 模型选择 + 忙时提示语 + 停/继续 + 审批桥 + 认领互斥 + 路径动态化
 // v13:配置路径改用插件同目录 config.json(支持目录改名后仍可分发)
+// v14:「继续」恢复任务改走完整投递流程(修复恢复后最终回复丢失);任务被终止/报错时如实告知
 module.exports = {
   name: 'mailbridge',
   inject: ['fs', 'timer', 'agents', 'sessions', 'agentDefaultModel'],
@@ -487,17 +488,75 @@ module.exports = {
           chat.cancelled = null;
           state.chats[req.chatId] = chat;
           await writeState(state);
-          agent.followup({
-            role: 'user',
-            content: [{ type: 'text', text: '[手机恢复执行] ' + resumed }],
-            source: { kind: 'user' },
-            id: 'mail-resume-' + Date.now(),
-          });
-          return '🔄 已恢复执行被终止的任务：' + String(resumed).slice(0, 60) + (String(resumed).length > 60 ? '…' : '');
+          // 只返回恢复指令,不在此处 followup:由 handleRequest 走与普通任务相同的
+          // "等待回合结束→提取回复→写回队列"流程。旧版在此直接 followup 后立即返回,
+          // 被恢复任务的最终回复无人回收,永远送不到手机(v13 丢回复 bug 根因)
+          return {
+            ack: '🔄 已恢复执行被终止的任务：' + String(resumed).slice(0, 60) + (String(resumed).length > 60 ? '…' : ''),
+            resumeText: '[手机恢复执行] ' + resumed,
+          };
         }
         return '没有已终止的任务可恢复。';
       }
       return null;
+    }
+
+    // 等待当前回合真正结束并产出回复文本(普通任务与「继续」恢复任务共用)
+    // 含:30 秒忙时提示、报错显式化、被终止如实告知
+    async function waitTurnReply(agent, firstSeq, req, fileName) {
+      const deadline = Date.now() + 10 * 60 * 1000;
+      let saw = false;
+      let prompted = false;
+      const disposePrompt = timer.timeout(async () => {
+        if (prompted) return;
+        let finished = false;
+        try {
+          const raw = await fs.readText(await fs.resolve(BASE + '/in/' + fileName));
+          const st = JSON.parse(raw);
+          if (st.status === 'done' || st.status === 'error') finished = true;
+        } catch (e) { finished = true; }
+        if (!finished) {
+          prompted = true;
+          const pf = 'feishu-prompt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '.json';
+          try {
+            await fs.writeText(await fs.resolve(BASE + '/in/' + pf), JSON.stringify({ status: 'done', from: 'feishu', chatId: req.chatId, reply: busyPrompt(), originFile: fileName }));
+            console.log('[mailbridge] 30秒未产出回复,已发送忙时提示: ' + pf);
+          } catch (e) { console.error('[mailbridge] 忙时提示失败: ' + e.message); }
+        }
+      }, 30000);
+      // 等待回合真正结束:看到 assistant/message 产出后,等待 turn/end 事件(而非 whenIdle 短暂空闲),
+      // 避免 agent 工具调用间隙的假 idle 导致提前结束、取消 30 秒提示
+      while (Date.now() < deadline) {
+        await sleep(600);
+        const evs = (agent.session.events || []).filter((e) => e.seq >= firstSeq);
+        if (evs.some((e) => e.type === 'turn/start' || e.type === 'assistant/message')) saw = true;
+        // 回合真正结束的标志:出现了 turn/end,或产出 assistant/message 后连续 2 次确认 idle(间隔检查,防假 idle)
+        if (evs.some((e) => e.type === 'turn/end')) break;
+        if (saw) {
+          const idle1 = await Promise.race([agent.whenIdle().then(() => true), sleep(2000).then(() => false)]);
+          if (idle1) {
+            await sleep(600);
+            const idle2 = await Promise.race([agent.whenIdle().then(() => true), sleep(2000).then(() => false)]);
+            if (idle2) break; // 连续两次确认空闲,判定回合结束
+          }
+        }
+      }
+      disposePrompt();
+      await sessions.flush(agent.session);
+      // 回合以报错结束时如实告知错误;被终止时如实告知终止——不得一律误导为"处理超时"
+      let turnErr = null;
+      let turnAborted = false;
+      for (const e of (agent.session.events || [])) {
+        if (e.seq < firstSeq || e.type !== 'turn/end') continue;
+        const r = e.data && e.data.reason;
+        if (r && r.kind === 'error') turnErr = String((r.error && (r.error.message || r.error)) || '未知错误').slice(0, 300);
+        if (r && r.kind === 'aborted') turnAborted = true;
+      }
+      let reply = summarize(agent.session.events, firstSeq);
+      if (turnErr) reply = reply ? reply + '\n\n⚠️ 本次任务最后报错: ' + turnErr : '❌ 任务执行失败: ' + turnErr;
+      if (!reply && turnAborted) reply = '⏹ 任务已被终止。输入「继续」可恢复执行。';
+      if (!reply) reply = '(处理超时,请稍后在电脑端查看)';
+      return reply;
     }
 
     async function handleRequest(fileName, req) {
@@ -513,6 +572,31 @@ module.exports = {
         const agent = await targetAgent(req);
         const ctl = await handleControlText(req, agent);
         if (ctl !== null) {
+          if (ctl && typeof ctl === 'object' && ctl.resumeText) {
+            // 「继续」:恢复执行被终止的任务,复用普通任务的等待/投递流程,保证结果送达手机
+            if (busy) {
+              await fs.writeText(target, JSON.stringify({ ...req, status: 'done', reply: '⏳ 上一个任务还在收尾,稍后再发「继续」即可。' }));
+              return;
+            }
+            busy = true;
+            try {
+              await agent.whenIdle();
+              const firstSeq = agent.session.seq + 1;
+              agent.followup({
+                role: 'user',
+                content: [{ type: 'text', text: ctl.resumeText }],
+                source: { kind: 'user' },
+                id: 'mail-resume-' + Date.now(),
+              });
+              const reply = ctl.ack + '\n\n' + (await waitTurnReply(agent, firstSeq, req, fileName));
+              await fs.writeText(target, JSON.stringify({ ...req, status: 'done', reply }));
+              console.log('[mailbridge] 已回复(恢复任务) ' + fileName);
+            } catch (err) {
+              try { await fs.writeText(target, JSON.stringify({ ...req, status: 'error', error: String((err && err.message) || err) })); } catch (_) {}
+              console.error('[mailbridge] 恢复任务失败 ' + fileName + ': ' + ((err && err.message) || err));
+            } finally { busy = false; }
+            return;
+          }
           await fs.writeText(target, JSON.stringify({ ...req, status: 'done', reply: ctl }));
           return;
         }
@@ -532,57 +616,7 @@ module.exports = {
         chat0.lastMsg = String(req.text || '');
         state0.chats[req.chatId] = chat0;
         await writeState(state0);
-        const deadline = Date.now() + 10 * 60 * 1000;
-        let saw = false;
-        // 30 秒提示:请求文件仍未完成(回复未产出)则发送一次;已产出则不打扰
-        let prompted = false;
-        const disposePrompt = timer.timeout(async () => {
-          if (prompted) return;
-          let finished = false;
-          try {
-            const raw = await fs.readText(await fs.resolve(BASE + '/in/' + fileName));
-            const st = JSON.parse(raw);
-            if (st.status === 'done' || st.status === 'error') finished = true;
-          } catch (e) { finished = true; }
-          if (!finished) {
-            prompted = true;
-            const pf = 'feishu-prompt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '.json';
-            try {
-              await fs.writeText(await fs.resolve(BASE + '/in/' + pf), JSON.stringify({ status: 'done', from: 'feishu', chatId: req.chatId, reply: busyPrompt(), originFile: fileName }));
-              console.log('[mailbridge] 30秒未产出回复,已发送忙时提示: ' + pf);
-            } catch (e) { console.error('[mailbridge] 忙时提示失败: ' + e.message); }
-          }
-        }, 30000);
-
-        // 等待回合真正结束:看到 assistant/message 产出后,等待 turn/end 事件(而非 whenIdle 短暂空闲),
-        // 避免 agent 工具调用间隙的假 idle 导致提前结束、取消 30 秒提示
-        while (Date.now() < deadline) {
-          await sleep(600);
-          const evs = (agent.session.events || []).filter((e) => e.seq >= firstSeq);
-          if (evs.some((e) => e.type === 'turn/start' || e.type === 'assistant/message')) saw = true;
-          // 回合真正结束的标志:出现了 turn/end,或产出 assistant/message 后连续 2 次确认 idle(间隔检查,防假 idle)
-          if (evs.some((e) => e.type === 'turn/end')) break;
-          if (saw) {
-            const idle1 = await Promise.race([agent.whenIdle().then(() => true), sleep(2000).then(() => false)]);
-            if (idle1) {
-              await sleep(600);
-              const idle2 = await Promise.race([agent.whenIdle().then(() => true), sleep(2000).then(() => false)]);
-              if (idle2) break; // 连续两次确认空闲,判定回合结束
-            }
-          }
-        }
-        disposePrompt();
-        await sessions.flush(agent.session);
-        // 回合以报错结束时必须如实告知错误,不得一律误导为"处理超时"
-        let turnErr = null;
-        for (const e of (agent.session.events || [])) {
-          if (e.seq < firstSeq || e.type !== 'turn/end') continue;
-          const r = e.data && e.data.reason;
-          if (r && r.kind === 'error') turnErr = String((r.error && (r.error.message || r.error)) || '未知错误').slice(0, 300);
-        }
-        let reply = summarize(agent.session.events, firstSeq);
-        if (turnErr) reply = reply ? reply + '\n\n⚠️ 本次任务最后报错: ' + turnErr : '❌ 任务执行失败: ' + turnErr;
-        if (!reply) reply = '(处理超时,请稍后在电脑端查看)';
+        const reply = await waitTurnReply(agent, firstSeq, req, fileName);
         await fs.writeText(target, JSON.stringify({ ...req, status: 'done', reply }));
         console.log('[mailbridge] 已回复 ' + fileName);
       } catch (err) {
@@ -657,6 +691,6 @@ module.exports = {
       }
     }, 3000);
 
-    console.log('[mailbridge] 持久化版 v13 已启动(路径动态化,可分发)');
+    console.log('[mailbridge] 持久化版 v14 已启动(恢复任务投递修复 + 终止/报错如实告知)');
   }
 };

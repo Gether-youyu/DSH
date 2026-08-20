@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * DSH 飞书桥 v3 -- 官方 SDK 长连接 + 任务管理命令。
+ * DSH 飞书桥 v4 -- 官方 SDK 长连接 + 任务管理命令 + 内置定时调度。
  * 手机飞书私聊机器人 -> 命令(本地处理) / 消息(队列 -> DSH 插件注入指定会话) -> 回复。
  *
  * 命令(发原文即可,大小写不限):
@@ -58,6 +58,58 @@ const HB_FILE = "/tmp/dsh-heartbeat";
 function beat() { try { require("fs").writeFileSync(HB_FILE, String(Date.now())); } catch (e) {} }
 beat();
 setInterval(beat, 60000);
+
+// ---------- 内置调度(定时任务收敛进桥进程,不再依赖 cron/launchd 定时项) ----------
+// 桥由 launchd KeepAlive 保活:崩溃自动拉起,调度随桥存活,系统登录项零新增。
+//   每 60s: 拉起 monitor.js(队列积压等检查,它自带直连飞书的告警通道)
+//           + 检查 DSH web 进程存活(连续 3 次未检出才告警,防瞬时抖动)
+//   每天 19:59 起(补跑窗口到 23:59): 拉起 daily-summary.js,当日只跑一次
+const { spawn, execFile } = require("child_process");
+const SCHED_STATE = BRIDGE_DIR + "/schedule-state.json";
+let ALERT_CHAT = "";
+try { ALERT_CHAT = JSON.parse(fs.readFileSync(__dirname + "/config.json", "utf8")).notify.alertChatId || ""; } catch (e) {}
+function schedRead() { try { return JSON.parse(fs.readFileSync(SCHED_STATE, "utf8")); } catch { return {}; } }
+function schedWrite(s) { try { fs.writeFileSync(SCHED_STATE, JSON.stringify(s)); } catch (e) {} }
+function localDate() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+let schedMonitorBusy = false, schedDailyBusy = false, schedWebMisses = 0;
+let schedMonFd = null, schedDailyFd = null;
+try { schedMonFd = fs.openSync("/tmp/dsh-monitor.log", "a"); } catch (e) {}
+try { schedDailyFd = fs.openSync("/tmp/daily-summary.log", "a"); } catch (e) {}
+function schedAlert(text) {
+  if (!ALERT_CHAT) return;
+  sendText(ALERT_CHAT, text).catch((e) => console.error("[feishu] 调度告警发送失败: " + e.message));
+}
+setInterval(() => {
+  try {
+    if (!schedMonitorBusy) {
+      schedMonitorBusy = true;
+      const p = spawn(process.execPath, [__dirname + "/monitor.js"], { stdio: ["ignore", schedMonFd, schedMonFd] });
+      const done = () => { schedMonitorBusy = false; };
+      p.on("exit", done); p.on("error", done);
+    }
+    execFile("/usr/bin/pgrep", ["-f", "bin.js web"], (err, stdout) => {
+      if (err || !String(stdout || "").trim()) {
+        schedWebMisses++;
+        if (schedWebMisses === 3) schedAlert("【DSH 调度告警】DSH web 进程已连续 3 分钟未检测到,飞书对话将无响应,请检查电脑端服务。");
+      } else { schedWebMisses = 0; }
+    });
+    const now = new Date();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    if (!schedDailyBusy && mins >= 19 * 60 + 59 && mins < 23 * 60 + 59) {
+      const st = schedRead();
+      if (st.lastDaily !== localDate()) {
+        st.lastDaily = localDate();
+        schedWrite(st); // 先落盘再执行:桥若中途重启不会重复发送
+        schedDailyBusy = true;
+        console.log("[feishu] 内置调度:触发每日总结邮件");
+        const p = spawn(process.execPath, [__dirname + "/daily-summary.js"], { stdio: ["ignore", schedDailyFd, schedDailyFd] });
+        const done = () => { schedDailyBusy = false; };
+        p.on("exit", done); p.on("error", done);
+      }
+    }
+  } catch (e) { console.error("[feishu] 内置调度异常: " + e.message); }
+}, 60000);
+console.log("[feishu] 内置调度已启动(监控每分钟 / 每日总结 19:59)");
 
 
 const client = new lark.Client({ appId: APP_ID, appSecret: APP_SECRET });
@@ -510,7 +562,7 @@ if (process.argv[2] === "test-card") {
 }
 
 channel.connect().then(() => {
-  console.log("[feishu] 飞书桥 v3 已启动,长连接已建立 " + new Date().toLocaleString() + ",App: " + APP_ID);
+  console.log("[feishu] 飞书桥 v4 已启动,长连接已建立 " + new Date().toLocaleString() + ",App: " + APP_ID);
 }).catch((e) => {
   console.error("[feishu] 连接失败: " + ((e && e.message) || e));
   process.exit(1);
